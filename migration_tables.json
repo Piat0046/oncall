@@ -1,0 +1,764 @@
+{
+  "tables": [
+    {
+      "name": "account_filter",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "ad_account_brand_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "ad_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "ad_mapping",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "address_",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "address_coordinate",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "address_postal_code",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "address_postal_code_roll_up",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "address_postal_code_roll_up_2",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "addresses",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "airflow_checkpoint",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "airflow_config",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "alert",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "amazon_auth_state",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_category",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_category_map",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_category_map_tmp",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_channel_alias",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_name_list",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "brand_name_ops",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "cafe_24_app_install",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "cafe_24_validated_mall_id_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "channel_names_map",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "chart",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "commerce_cogs_relation",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "commerce_order_log0",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "commerce_review",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "connection_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "connection_user",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "contact_form",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "coupang_wing_manual_brand_name",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "coupon",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "credit_transaction",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "custom_column_map",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "custom_dashboard_document",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "custom_measure",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dag_run",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_document",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_feature",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_memo",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_project",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_project_",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_sharing",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "dashboard_sharing_",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_ad_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_alias",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_brand",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_brand_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection_data_meta",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection_status",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_connection_v2",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_cube_job",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_export_job",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_lookup",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_mall_url",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_meta",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_meta_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_meta_data_cube_job",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_meta_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_pipeline_engineer",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_refresh_job",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_set_group",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_set_group_membership",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_shop",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_source",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_source_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_source_job",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_source_status",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "data_source_v2",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "easyadmin_base_product_brand",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "easyadmin_brand_channel",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "email_history",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "enc_key",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "etl_column_map",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "fee_history",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "first_connection",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "godomall5_user",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_product_stat",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_acc_stat",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_data_sta",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_pay_product",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_pay_product_",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_sales_",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_sales__",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "laplace_user_stat_log0",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "location_geo",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "location_postal",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "location_postal_geo",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "mall_info_secret",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "mall_info_secret_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "mall_info_secret_key",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "manage",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "memory_usage",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "nicepay_billing_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "nicepay_billing_interval",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "nicepay_billing_payment_history",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "nicepay_card_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "oauth_account",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "oauth_information",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "operation_history",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "pipeline",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "pipeline_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "plan",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "plan_scope",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project_column_permission",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project_info",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project_order_sales",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project_order_sales_trino",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "project_setting",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "promotion",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "role",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "scope_availability",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "sharing_request_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "shorten_url",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "slack_app",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "smartstore_2fa",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "smartstore_2fa_sensor",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "smartstore_verification",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "sourcing_checkpoint",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "subscription",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_billing",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_billing_flatten",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_billing_partner",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_billing_partner_v2",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_billing_test",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_data_meta_snapshot",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_user",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "tb_user_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "temp_brand_table",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "test_zero_date",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "url_channel_code",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_alert",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_data_connection",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_data_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_data_log_audit_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_data_shop",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_event_log",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_notification_push",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_promotion",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_push",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_push_schedule",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_push_setting",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_push_sharing",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_push_temp",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "user_subscription",
+      "where": "",
+      "limit": null
+    },
+    {
+      "name": "zip_code",
+      "where": "",
+      "limit": null
+    }
+  ]
+}

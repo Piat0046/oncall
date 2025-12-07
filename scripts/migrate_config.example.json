@@ -1,0 +1,29 @@
+{
+  "tables": [
+    {
+      "name": "laplace.data_meta",
+      "where": "provider IN ('CAFE_24', 'CAFE_24_ANALYTICS', 'KAKAO_MOMENT', 'KAKAO_SHOPPING', 'NAVER_SEARCHAD', 'COUPANG_WING')",
+      "limit": 1000
+    },
+    {
+      "name": "laplace.user_data_log",
+      "where": "use_yn = 'Y'",
+      "limit": 1000
+    },
+    {
+      "name": "laplace.cafe_24_app_install",
+      "where": "install_yn = 'Y'",
+      "limit": 500
+    },
+    {
+      "name": "laplace.user_subscription",
+      "where": "NOW() <= plan_end_datetime_id",
+      "limit": 500
+    },
+    {
+      "name": "laplace.data_source_status",
+      "where": "use_yn = 'Y' AND status = 'SYNC_ENABLED'",
+      "limit": 500
+    }
+  ]
+}
