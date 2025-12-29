@@ -19,6 +19,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from trino_migration.cache import DataCache
 from trino_migration.client import TrinoClient
 from trino_migration.config import TableMigrationConfig, settings
 from trino_migration.extractor import MetadataExtractor, TableMetadata
@@ -82,6 +83,7 @@ class TrinoMigrator:
         s3_copier: S3Copier,
         target_bucket: str,
         target_prefix: str = "",
+        cache_dir: str = "./cache",
     ):
         self.source_client = source_client
         self.target_client = target_client
@@ -89,6 +91,7 @@ class TrinoMigrator:
         self.target_bucket = target_bucket
         self.target_prefix = target_prefix
         self.extractor = MetadataExtractor(source_client)
+        self.cache = DataCache(cache_dir)
 
     @classmethod
     def from_settings(cls) -> "TrinoMigrator":
@@ -209,10 +212,9 @@ class TrinoMigrator:
         # 타겟에 테이블 생성
         if not dry_run:
             try:
-                # 스키마 생성
+                # 스키마 생성 (location 지정 시 Hive Metastore 오류 발생하므로 기본 경로 사용)
                 if not self.target_client.schema_exists(schema, target_catalog):
-                    schema_location = f"s3://{self.target_bucket}/{self.target_prefix}/{schema}".lstrip("/")
-                    self.target_client.create_schema(schema, schema_location, target_catalog)
+                    self.target_client.create_schema(schema, catalog=target_catalog)
                     console.print(f"  [green]스키마 생성: {target_catalog}.{schema}[/green]")
 
                 # DDL 생성 및 실행
@@ -280,90 +282,217 @@ class TrinoMigrator:
         target_table: str | None = None,
         where: str | None = None,
         dry_run: bool = False,
+        use_cache: bool = True,
+        delete_cache_on_success: bool = False,
     ) -> MigrationResult:
-        """INSERT SELECT 방식으로 테이블 마이그레이션"""
-        schema = target_schema or metadata.schema_name
-        table = target_table or metadata.table_name
+        """캐시 기반 INSERT SELECT 방식으로 테이블 마이그레이션
 
-        console.print(f"\n[bold cyan]INSERT SELECT: {metadata.catalog}.{metadata.schema_name}.{metadata.table_name} → {target_catalog}.{schema}.{table}[/bold cyan]")
+        1. 소스 Trino에서 데이터 추출 → 로컬 Parquet 캐시
+        2. 타겟 Trino에 테이블 생성
+        3. 캐시에서 데이터 로드 → 타겟에 INSERT
+        """
+        # 소스 정보
+        source_catalog = metadata.catalog
+        source_schema = metadata.schema_name
+        source_table = metadata.table_name
+
+        # 타겟 정보 (스키마/테이블 변경 가능)
+        tgt_schema = target_schema or source_schema
+        tgt_table = target_table or source_table
+
+        source_full = f"{source_catalog}.{source_schema}.{source_table}"
+        target_full = f"{target_catalog}.{tgt_schema}.{tgt_table}"
+
+        console.print(f"\n[bold cyan]캐시 기반 마이그레이션: {source_full} → {target_full}[/bold cyan]")
 
         if where:
             console.print(f"  WHERE: {where}")
 
-        # row count 조회
+        # ============================================================
+        # 1단계: 소스에서 데이터 추출 → 캐시
+        # ============================================================
         try:
-            source_count = self.source_client.get_row_count(
-                metadata.schema_name, metadata.table_name, where, catalog=metadata.catalog
-            )
-            console.print(f"  소스 row count: {source_count:,}")
-        except Exception as e:
-            console.print(f"  [yellow]row count 조회 실패: {e}[/yellow]")
-            source_count = 0
+            # 캐시 존재 여부 확인
+            cache_exists = self.cache.exists(source_catalog, source_schema, source_table)
 
-        if dry_run:
-            console.print(f"  [yellow][DRY-RUN] {source_count:,}건 마이그레이션 예정[/yellow]")
-            return MigrationResult(
-                catalog=target_catalog,
-                schema_name=schema,
-                table_name=table,
-                method="insert_select",
-                status="dry_run",
-                rows_inserted=source_count,
-            )
+            if cache_exists and use_cache:
+                console.print(f"  [yellow]캐시 존재 - 재사용[/yellow]")
+                data, cache_meta = self.cache.load(source_catalog, source_schema, source_table)
+                columns = cache_meta.columns
+            else:
+                # 소스에서 데이터 추출
+                console.print(f"  [dim]소스에서 데이터 추출 중...[/dim]")
+                select_query = f"SELECT * FROM {source_full}"
+                if where:
+                    select_query += f" WHERE {where}"
 
-        try:
-            # 타겟 스키마 생성
-            if not self.target_client.schema_exists(schema, target_catalog):
-                schema_location = f"s3://{self.target_bucket}/{self.target_prefix}/{schema}".lstrip("/")
-                self.target_client.create_schema(schema, schema_location, target_catalog)
-                console.print(f"  [green]스키마 생성: {target_catalog}.{schema}[/green]")
+                data = self.source_client.execute(select_query)
+                console.print(f"  [dim]추출 완료: {len(data):,}건[/dim]")
 
-            # 타겟 테이블 생성 (CTAS 또는 CREATE + INSERT)
-            target_location = f"s3://{self.target_bucket}/{self.target_prefix}/{schema}/{table}"
+                # 컬럼 정보 추출
+                columns = [{"name": col, "type": "VARCHAR"} for col in metadata.columns]
 
-            source_full = f"{metadata.catalog}.{metadata.schema_name}.{metadata.table_name}"
-            target_full = f"{target_catalog}.{schema}.{table}"
+                if dry_run:
+                    console.print(f"  [yellow][DRY-RUN] {len(data):,}건 마이그레이션 예정[/yellow]")
+                    return MigrationResult(
+                        catalog=target_catalog,
+                        schema_name=tgt_schema,
+                        table_name=tgt_table,
+                        method="insert_select",
+                        status="dry_run",
+                        rows_inserted=len(data),
+                    )
 
-            # 기존 테이블 DROP
-            if self.target_client.table_exists(schema, table, target_catalog):
-                self.target_client.execute(f"DROP TABLE {target_full}", fetch=False)
-
-            # CTAS로 생성
-            ctas_query = f"""
-                CREATE TABLE {target_full}
-                WITH (
-                    external_location = '{target_location}',
-                    format = '{metadata.file_format or 'PARQUET'}'
+                # 캐시에 저장
+                self.cache.save(
+                    source_catalog, source_schema, source_table,
+                    data, columns, metadata.ddl
                 )
-                AS SELECT * FROM {source_full}
-            """
-            if where:
-                ctas_query += f" WHERE {where}"
-
-            console.print(f"  [dim]CTAS 실행 중...[/dim]")
-            self.target_client.execute(ctas_query, fetch=False)
-
-            # 결과 row count 확인
-            target_count = self.target_client.get_row_count(schema, table, catalog=target_catalog)
-            console.print(f"  [green]완료: {target_count:,}건 삽입[/green]")
-
-            return MigrationResult(
-                catalog=target_catalog,
-                schema_name=schema,
-                table_name=table,
-                method="insert_select",
-                status="success",
-                rows_inserted=target_count,
-            )
 
         except Exception as e:
+            console.print(f"  [red]데이터 추출 실패: {e}[/red]")
             return MigrationResult(
                 catalog=target_catalog,
-                schema_name=schema,
-                table_name=table,
+                schema_name=tgt_schema,
+                table_name=tgt_table,
                 method="insert_select",
                 status="error",
-                error=str(e),
+                error=f"데이터 추출 실패: {e}",
+            )
+
+        # ============================================================
+        # 2단계: 타겟에 테이블 생성 및 데이터 INSERT
+        # ============================================================
+        try:
+            is_iceberg = "iceberg" in target_catalog.lower()
+
+            # 타겟 스키마 생성 (location 없이 - Hive Metastore S3 경로 생성 문제 회피)
+            if not self.target_client.schema_exists(tgt_schema, target_catalog):
+                self.target_client.create_schema(tgt_schema, catalog=target_catalog)
+                console.print(f"  [green]스키마 생성: {target_catalog}.{tgt_schema}[/green]")
+
+            # 기존 테이블 DROP
+            if self.target_client.table_exists(tgt_schema, tgt_table, target_catalog):
+                self.target_client.execute(f"DROP TABLE {target_full}", fetch=False)
+                console.print(f"  [dim]기존 테이블 삭제: {target_full}[/dim]")
+
+            # 컬럼 정의 생성 (메타데이터에서 원본 타입 그대로 사용)
+            if metadata.columns:
+                col_defs = ", ".join([f'"{col["Column"]}" {col["Type"]}' for col in metadata.columns])
+            else:
+                # 데이터에서 컬럼 추출 (타입 정보 없으면 VARCHAR)
+                if data:
+                    col_defs = ", ".join([f'"{col}" VARCHAR' for col in data[0].keys()])
+                else:
+                    col_defs = "dummy VARCHAR"
+
+            # 테이블 생성 (location 지정하지 않음 - Hive Metastore 기본 warehouse 사용)
+            if is_iceberg:
+                # Iceberg: location 없이 생성 (managed table)
+                create_query = f"CREATE TABLE {target_full} ({col_defs})"
+            else:
+                # Hive: format만 지정
+                create_query = f"""
+                    CREATE TABLE {target_full} ({col_defs})
+                    WITH (format = '{metadata.file_format or 'PARQUET'}')
+                """
+            self.target_client.execute(create_query, fetch=False)
+            console.print(f"  [green]테이블 생성: {target_full}[/green]")
+
+            # 데이터 INSERT (배치)
+            if data:
+                batch_size = 1000
+                total_batches = (len(data) + batch_size - 1) // batch_size
+                inserted = 0
+
+                insert_progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    TextColumn("({task.completed}/{task.total})"),
+                    TimeElapsedColumn(),
+                    console=console,
+                )
+
+                with insert_progress:
+                    insert_task = insert_progress.add_task(
+                        f"INSERT {tgt_table}", total=len(data)
+                    )
+
+                    for i in range(0, len(data), batch_size):
+                        batch = data[i:i + batch_size]
+                        if not batch:
+                            continue
+
+                        # VALUES 절 생성
+                        col_names = list(batch[0].keys())
+                        values_list = []
+                        for row in batch:
+                            vals = []
+                            for col in col_names:
+                                val = row.get(col)
+                                if val is None:
+                                    vals.append("NULL")
+                                elif isinstance(val, str):
+                                    # 문자열은 이스케이프 후 따옴표로 감싸기
+                                    escaped = val.replace("'", "''")
+                                    vals.append(f"'{escaped}'")
+                                elif isinstance(val, bool):
+                                    vals.append("true" if val else "false")
+                                elif isinstance(val, (int, float)):
+                                    vals.append(str(val))
+                                elif isinstance(val, (dict, list)):
+                                    # JSON 타입
+                                    import json
+                                    escaped = json.dumps(val, ensure_ascii=False).replace("'", "''")
+                                    vals.append(f"'{escaped}'")
+                                elif hasattr(val, 'isoformat'):
+                                    # datetime, date, time 타입 (Trino는 'T' 대신 공백 사용)
+                                    ts_str = val.isoformat().replace('T', ' ')
+                                    vals.append(f"TIMESTAMP '{ts_str}'")
+                                else:
+                                    # 기타 타입은 문자열로
+                                    escaped = str(val).replace("'", "''")
+                                    vals.append(f"'{escaped}'")
+                            values_list.append(f"({', '.join(vals)})")
+
+                        insert_query = f"""
+                            INSERT INTO {target_full} ({', '.join([f'"{c}"' for c in col_names])})
+                            VALUES {', '.join(values_list)}
+                        """
+                        self.target_client.execute(insert_query, fetch=False)
+                        inserted += len(batch)
+                        insert_progress.update(insert_task, completed=inserted)
+
+                console.print(f"  [green]INSERT 완료: {inserted:,}건[/green]")
+            else:
+                inserted = 0
+                console.print(f"  [yellow]데이터 없음 (빈 테이블)[/yellow]")
+
+            # 성공 시 캐시 삭제 (옵션)
+            if delete_cache_on_success:
+                self.cache.delete(source_catalog, source_schema, source_table)
+
+            return MigrationResult(
+                catalog=target_catalog,
+                schema_name=tgt_schema,
+                table_name=tgt_table,
+                method="insert_select",
+                status="success",
+                rows_inserted=inserted,
+            )
+
+        except Exception as e:
+            console.print(f"  [red]타겟 INSERT 실패: {e}[/red]")
+            console.print(f"  [yellow]캐시는 유지됨 - 재시도 가능[/yellow]")
+            return MigrationResult(
+                catalog=target_catalog,
+                schema_name=tgt_schema,
+                table_name=tgt_table,
+                method="insert_select",
+                status="error",
+                error=f"타겟 INSERT 실패: {e}",
             )
 
     def migrate_table(
@@ -422,16 +551,17 @@ class TrinoMigrator:
         parallel_tables: int = 3,
         dry_run: bool = False,
     ) -> MigrationSummary:
-        """스키마 전체 마이그레이션"""
+        """스키마 전체 마이그레이션 (테이블 단위 순차 처리)"""
         target_cat = target_catalog or catalog
         console.print(f"\n[bold]스키마 마이그레이션: {catalog}.{schema} → {target_cat}.{target_schema or schema}[/bold]")
         console.print(f"  방식: {method}")
-        console.print(f"  병렬 처리: {parallel_tables}개")
 
-        # 스키마 메타데이터 추출
-        schema_meta = self.extractor.extract_schema_metadata(
-            catalog, schema, exclude_tables
-        )
+        # 테이블 목록만 먼저 조회
+        tables = self.source_client.get_tables(schema, catalog)
+        exclude_set = set(exclude_tables or [])
+        tables = [t for t in tables if t not in exclude_set]
+
+        console.print(f"  대상 테이블: {len(tables)}개")
 
         summary = MigrationSummary()
 
@@ -445,9 +575,18 @@ class TrinoMigrator:
         )
 
         with progress:
-            task = progress.add_task("테이블 마이그레이션", total=len(schema_meta.tables))
+            task = progress.add_task("테이블 마이그레이션", total=len(tables))
 
-            for table_meta in schema_meta.tables:
+            for table in tables:
+                # 1. 메타데이터 추출
+                table_meta = self.extractor.extract_table_metadata(catalog, schema, table)
+
+                if table_meta is None:
+                    # VIEW 등 스킵
+                    progress.advance(task)
+                    continue
+
+                # 2. 바로 마이그레이션
                 if method == "s3_copy":
                     result = self.migrate_table_s3_copy(
                         metadata=table_meta,

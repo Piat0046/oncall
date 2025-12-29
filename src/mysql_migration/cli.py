@@ -26,6 +26,7 @@ from mysql_migration.migrator import (
     normalize_where,
     is_date_suffixed_table,
     execute_lookup_query,
+    build_user_id_where,
 )
 
 console = Console()
@@ -134,6 +135,29 @@ async def migrate_single_database(
                 }
                 for table in all_tables
             ]
+
+        # laplace 모드: user_id 컬럼 유무에 따라 WHERE 조건 동적 생성
+        if db_config.laplace_mode and db_config.user_ids:
+            console.print(f"\n[bold magenta][Laplace 모드][/bold magenta]")
+            console.print(f"  필터링 user_id: {db_config.user_ids}")
+
+            # 각 테이블의 user_id 컬럼 유무 확인
+            table_names = [cfg["name"] for cfg in tables_config]
+            user_id_info = await migrator.get_tables_with_user_id_info(table_names)
+
+            tables_with_user_id = [t for t, has in user_id_info.items() if has]
+            tables_without_user_id = [t for t, has in user_id_info.items() if not has]
+
+            console.print(f"  user_id 컬럼 있음: {len(tables_with_user_id)}개 테이블 → 필터링 적용")
+            console.print(f"  user_id 컬럼 없음: {len(tables_without_user_id)}개 테이블 → 전체 마이그레이션")
+
+            # WHERE 조건 업데이트
+            for cfg in tables_config:
+                table_name = cfg["name"]
+                if user_id_info.get(table_name, False):
+                    # user_id가 있는 테이블: user_id 필터링 추가
+                    cfg["where"] = build_user_id_where(db_config.user_ids, cfg["where"])
+                # user_id가 없는 테이블은 기존 where 조건 유지
 
         if not tables_config:
             console.print("[yellow]마이그레이션할 테이블이 없습니다.[/yellow]")
@@ -419,6 +443,8 @@ async def run(yaml_file, dry_run, parallel, max_workers, max_table_workers):
 @click.option("--auto-order/--no-auto-order", default=True, help="외래키 기반 자동 순서 정렬 (기본: 활성)")
 @click.option("--exclude-date-tables/--include-date-tables", default=True, help="날짜 suffix 테이블 제외 (기본: 제외)")
 @click.option("--max-table-workers", type=int, default=5, help="테이블 병렬 처리 수 (기본: 5)")
+@click.option("--laplace-mode", is_flag=True, help="Laplace 모드: user_id 컬럼 유무에 따라 자동 필터링")
+@click.option("--user-ids", "user_ids_str", default=None, help="Laplace 모드에서 필터링할 user_id 목록 (콤마 구분)")
 @click.option("--dry-run", is_flag=True, help="실제 마이그레이션 없이 설정만 확인")
 @async_command
 async def migrate(
@@ -443,6 +469,8 @@ async def migrate(
     auto_order,
     exclude_date_tables,
     max_table_workers,
+    laplace_mode,
+    user_ids_str,
     dry_run,
 ):
     """단일 데이터베이스 마이그레이션 (CLI 인자 사용)
@@ -452,7 +480,22 @@ async def migrate(
       data-migrate migrate -d laplace --table users --table orders
       data-migrate migrate -d laplace --all --exclude large_logs
       data-migrate migrate -d laplace --all --max-table-workers 10
+      data-migrate migrate -d laplace --all --laplace-mode --user-ids 1,2,3
     """
+    # user_ids 파싱
+    user_ids = None
+    if user_ids_str:
+        try:
+            user_ids = [int(uid.strip()) for uid in user_ids_str.split(",")]
+        except ValueError:
+            console.print("[red]오류: --user-ids는 콤마로 구분된 정수 목록이어야 합니다.[/red]")
+            sys.exit(1)
+
+    # laplace 모드 검증
+    if laplace_mode and not user_ids:
+        console.print("[red]오류: --laplace-mode 사용 시 --user-ids가 필요합니다.[/red]")
+        sys.exit(1)
+
     # 테이블 지정 방식 확인
     if not config_file and not migrate_all_tables and not tables:
         console.print("[red]오류: 마이그레이션할 테이블을 지정해야 합니다.[/red]")
@@ -473,6 +516,8 @@ async def migrate(
             mode="tables",
             tables=[TableConfig(**t) if isinstance(t, dict) else TableConfig(name=t)
                     for t in config.get("tables", [])],
+            laplace_mode=laplace_mode,
+            user_ids=user_ids,
         )
     elif tables:
         from mysql_migration.config import TableConfig
@@ -481,6 +526,8 @@ async def migrate(
             target_name=target_database,
             mode="tables",
             tables=[TableConfig(name=t, where=where_clause or "", limit=limit) for t in tables],
+            laplace_mode=laplace_mode,
+            user_ids=user_ids,
         )
     else:
         db_config = DatabaseConfig(
@@ -490,6 +537,8 @@ async def migrate(
             exclude=list(exclude_tables),
             where=where_clause or "",
             limit=limit,
+            laplace_mode=laplace_mode,
+            user_ids=user_ids,
         )
 
     # 연결 설정
@@ -571,6 +620,19 @@ databases:
   - name: logs
     mode: all
     exclude_date_tables: false  # DB별로 설정 오버라이드 가능
+
+  # 예시 5: Laplace 모드 - user_id 기반 자동 필터링
+  # user_id 컬럼이 있는 테이블은 지정된 user_id만 필터링
+  # user_id 컬럼이 없는 테이블은 전체 데이터 마이그레이션
+  - name: laplace
+    mode: all
+    laplace_mode: true
+    user_ids:
+      - 1
+      - 2
+      - 3
+    exclude:
+      - large_log_table
 
 # 동적 데이터베이스 (쿼리 결과로 DB명 생성)
 dynamic_databases:

@@ -11,13 +11,35 @@ services:
       MYSQL_USER: laplace
       MYSQL_PASSWORD: laplace123
     ports:
-      - "3307:3306"
+      - "11002:3306"
     volumes:
       - ./data/mysql:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - migrator-network
+
+  # ============================================================
+  # PostgreSQL (Hive Metastore 백엔드)
+  # ============================================================
+  postgres:
+    image: postgres:15
+    container_name: migrator-postgres
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive123
+      POSTGRES_DB: metastore
+    ports:
+      - "11004:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,7 +58,7 @@ services:
       PERSISTENCE: 1
       AWS_DEFAULT_REGION: ap-northeast-2
     ports:
-      - "4566:4566"
+      - "11003:4566"
     volumes:
       - ./data/localstack:/var/lib/localstack
       - ./docker/localstack/init:/etc/localstack/init/ready.d
@@ -50,48 +72,30 @@ services:
       - migrator-network
 
   # ============================================================
-  # Hive Metastore (PostgreSQL 백엔드)
+  # Hive Metastore (Hive 3.x - PostgreSQL 백엔드)
   # ============================================================
-  hive-metastore-db:
-    image: postgres:15
-    container_name: migrator-hive-metastore-db
-    environment:
-      POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive123
-      POSTGRES_DB: metastore
-    volumes:
-      - ./data/hive-metastore-db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - migrator-network
-
   hive-metastore:
-    image: apache/hive:4.0.0
+    image: naushadh/hive-metastore:latest
     container_name: migrator-hive-metastore
     depends_on:
-      hive-metastore-db:
+      postgres:
         condition: service_healthy
       localstack:
         condition: service_healthy
     environment:
-      SERVICE_NAME: metastore
-      DB_DRIVER: postgres
-      SERVICE_OPTS: >-
-        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hive-metastore-db:5432/metastore
-        -Djavax.jdo.option.ConnectionUserName=hive
-        -Djavax.jdo.option.ConnectionPassword=hive123
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_DB: metastore
+      DATABASE_USER: hive
+      DATABASE_PASSWORD: hive123
+      DATABASE_TYPE: postgres
+      S3_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET: laplace-dashboard
+      S3_PREFIX: warehouse
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
     ports:
-      - "9083:9083"
-    volumes:
-      - ./docker/hive/conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
-      - ./data/hive-warehouse:/opt/hive/data/warehouse
+      - "11001:9083"
     networks:
       - migrator-network
 
@@ -106,10 +110,19 @@ services:
       - localstack
       - mysql
     ports:
-      - "8080:8080"
+      - "11000:8080"
     volumes:
       - ./docker/trino/etc:/etc/trino:ro
       - ./data/trino:/data/trino
+    environment:
+      # JVM 메모리 설정 (docker memory limit의 80% 권장)
+      JAVA_TOOL_OPTIONS: "-Xmx${TRINO_JVM_MEMORY:-4G}"
+    deploy:
+      resources:
+        limits:
+          memory: ${TRINO_MEMORY_LIMIT:-6G}
+        reservations:
+          memory: ${TRINO_MEMORY_RESERVATION:-4G}
     networks:
       - migrator-network
 

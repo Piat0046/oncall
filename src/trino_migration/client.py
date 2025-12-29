@@ -52,10 +52,15 @@ class TrinoClient:
         cursor = conn.cursor()
         try:
             cursor.execute(query)
-            if fetch and cursor.description:
+            # Trino는 lazy execution이므로 결과를 반드시 소비해야 쿼리가 완료됨
+            if cursor.description:
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                return [dict(zip(columns, row)) for row in rows]
+                if fetch:
+                    return [dict(zip(columns, row)) for row in rows]
+            else:
+                # INSERT/UPDATE/DELETE 등 결과가 없는 쿼리도 완료 대기
+                cursor.fetchall()
             return []
         finally:
             cursor.close()
@@ -154,8 +159,13 @@ class TrinoClient:
         if match:
             return match.group(1)
 
-        # external_location 속성에서 추출
+        # external_location 속성에서 추출 (Hive)
         match = re.search(r"external_location\s*=\s*'([^']+)'", ddl, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        # location 속성에서 추출 (Iceberg)
+        match = re.search(r"(?<![_\w])location\s*=\s*'([^']+)'", ddl, re.IGNORECASE)
         if match:
             return match.group(1)
 

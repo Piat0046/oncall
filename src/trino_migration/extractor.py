@@ -175,14 +175,28 @@ class MetadataExtractor:
             flags=re.IGNORECASE,
         )
 
-        # location 변경
+        # location 변경 (Iceberg는 location, Hive는 external_location 사용)
         if target_location and metadata.location:
-            ddl = re.sub(
-                rf"(external_location\s*=\s*')[^']+(')",
-                rf"\g<1>{target_location}\g<2>",
-                ddl,
-                flags=re.IGNORECASE,
-            )
+            is_iceberg = "iceberg" in target_catalog.lower()
+
+            if is_iceberg:
+                # Iceberg: external_location → location 으로 변환
+                ddl = re.sub(
+                    rf"external_location\s*=\s*'[^']+'",
+                    f"location = '{target_location}'",
+                    ddl,
+                    flags=re.IGNORECASE,
+                )
+            else:
+                # Hive: external_location 유지
+                ddl = re.sub(
+                    rf"(external_location\s*=\s*')[^']+(')",
+                    rf"\g<1>{target_location}\g<2>",
+                    ddl,
+                    flags=re.IGNORECASE,
+                )
+
+            # LOCATION 키워드도 변경 (Hive external table용)
             ddl = re.sub(
                 rf"(LOCATION\s+')[^']+(')",
                 rf"\g<1>{target_location}\g<2>",

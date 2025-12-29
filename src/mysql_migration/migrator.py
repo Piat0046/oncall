@@ -45,6 +45,29 @@ def normalize_where(where: str | None) -> str:
     return where.strip()
 
 
+def build_user_id_where(user_ids: list[int], existing_where: str | None = None) -> str:
+    """user_id 필터링 WHERE 조건 생성
+
+    Args:
+        user_ids: 필터링할 user_id 목록
+        existing_where: 기존 WHERE 조건 (있으면 AND로 결합)
+
+    Returns:
+        완성된 WHERE 조건 문자열
+    """
+    if not user_ids:
+        return normalize_where(existing_where)
+
+    # user_id IN (...) 조건 생성
+    user_id_condition = f"user_id IN ({', '.join(map(str, user_ids))})"
+
+    existing = normalize_where(existing_where)
+    if existing == "1=1":
+        return user_id_condition
+    else:
+        return f"({existing}) AND {user_id_condition}"
+
+
 def topological_sort(tables: list[str], dependencies: dict[str, set[str]]) -> list[str]:
     """외래키 의존성을 기반으로 테이블을 토폴로지컬 정렬"""
     table_set = set(tables)
@@ -258,6 +281,22 @@ class AsyncMySQLMigrator:
                 await cursor.execute(f"DESCRIBE `{table_name}`")
                 rows = await cursor.fetchall()
                 return [row["Field"] for row in rows]
+
+    async def has_user_id_column(self, table_name: str) -> bool:
+        """테이블에 user_id 컬럼이 있는지 확인"""
+        columns = await self.get_table_columns(table_name)
+        return "user_id" in columns
+
+    async def get_tables_with_user_id_info(self, table_names: list[str]) -> dict[str, bool]:
+        """여러 테이블의 user_id 컬럼 유무를 한 번에 조회
+
+        Returns:
+            {table_name: has_user_id} 딕셔너리
+        """
+        result = {}
+        for table_name in table_names:
+            result[table_name] = await self.has_user_id_column(table_name)
+        return result
 
     async def get_foreign_key_dependencies(self, table_names: list[str]) -> dict[str, set[str]]:
         """테이블들의 외래키 의존성 조회"""

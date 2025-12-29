@@ -18,6 +18,7 @@ echo "Creating S3 buckets..."
 awslocal s3 mb s3://warehouse || true
 awslocal s3 mb s3://datalake || true
 awslocal s3 mb s3://raw-data || true
+awslocal s3 mb s3://laplace-dashboard || true
 
 echo "S3 buckets created successfully!"
 

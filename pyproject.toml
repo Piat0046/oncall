@@ -11,6 +11,7 @@ dependencies = [
     # Trino
     "trino>=0.328.0",
     "boto3>=1.34.0",
+    "pyarrow>=14.0.0",
     # Common
     "click>=8.1.7",
     "python-dotenv>=1.0.0",

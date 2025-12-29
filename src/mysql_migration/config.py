@@ -105,6 +105,9 @@ class DatabaseConfig(BaseModel):
     where: str = ""  # 전체 테이블에 적용할 기본 WHERE 조건
     limit: int | None = None  # 전체 테이블에 적용할 기본 LIMIT
     exclude_date_tables: bool = True  # 날짜 suffix 테이블 제외 (기본: True)
+    # laplace 모드: user_id 컬럼 유무에 따라 자동 필터링
+    laplace_mode: bool = False
+    user_ids: list[int] | None = None  # laplace 모드에서 필터링할 user_id 목록
 
     def model_post_init(self, __context) -> None:
         """None 값을 빈 리스트로 변환"""
