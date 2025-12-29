@@ -1,7 +1,10 @@
 services:
-  mysql-test:
+  # ============================================================
+  # MySQL (마이그레이션 타겟)
+  # ============================================================
+  mysql:
     image: mysql:8.0
-    container_name: airflow-validator-mysql
+    container_name: migrator-mysql
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: laplace
@@ -10,7 +13,7 @@ services:
     ports:
       - "3307:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - ./data/mysql:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
@@ -18,26 +21,98 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - migrator-network
 
-  # PostgreSQL (Airflow 메타데이터 테스트용)
-  postgres-test:
-    image: postgres:15
-    container_name: airflow-validator-postgres
+  # ============================================================
+  # LocalStack (AWS 서비스 에뮬레이션: S3, SecretsManager, SQS)
+  # ============================================================
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: migrator-localstack
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow123
-      POSTGRES_DB: airflow
+      SERVICES: s3,secretsmanager,sqs
+      DEBUG: 0
+      PERSISTENCE: 1
+      AWS_DEFAULT_REGION: ap-northeast-2
     ports:
-      - "5433:5432"
+      - "4566:4566"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+      - ./data/localstack:/var/lib/localstack
+      - ./docker/localstack/init:/etc/localstack/init/ready.d
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - migrator-network
 
-volumes:
-  mysql_data:
-  postgres_data:
+  # ============================================================
+  # Hive Metastore (PostgreSQL 백엔드)
+  # ============================================================
+  hive-metastore-db:
+    image: postgres:15
+    container_name: migrator-hive-metastore-db
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive123
+      POSTGRES_DB: metastore
+    volumes:
+      - ./data/hive-metastore-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - migrator-network
+
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: migrator-hive-metastore
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hive-metastore-db:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive123
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./docker/hive/conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+      - ./data/hive-warehouse:/opt/hive/data/warehouse
+    networks:
+      - migrator-network
+
+  # ============================================================
+  # Trino (분산 SQL 쿼리 엔진)
+  # ============================================================
+  trino:
+    image: trinodb/trino:439
+    container_name: migrator-trino
+    depends_on:
+      - hive-metastore
+      - localstack
+      - mysql
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/trino/etc:/etc/trino:ro
+      - ./data/trino:/data/trino
+    networks:
+      - migrator-network
+
+networks:
+  migrator-network:
+    driver: bridge

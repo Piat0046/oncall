@@ -4,25 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Airflow 작업 결과 검증 도구 (airflow-validator) - MySQL에서 동기화 실패 데이터를 조회하고, Airflow REST API 또는 PostgreSQL에서 DAG 실패 상세 정보를 확인하여 XLSX 리포트를 생성하는 Python CLI 도구.
+데이터 마이그레이션 도구 (data-migrator) - MySQL 및 Trino 간 데이터 마이그레이션을 지원하는 Python CLI 도구. 비동기 처리 및 병렬 마이그레이션 지원.
 
 ## Project Structure
 
 ```
-oncall-claude/
-├── src/airflow_validator/     # DAG 검증 도구
-│   ├── api/                   # Airflow REST API 클라이언트
-│   ├── db/                    # MySQL, PostgreSQL 클라이언트
-│   ├── services/              # 비즈니스 로직
-│   ├── exporters/             # XLSX 내보내기
-│   └── cli.py                 # CLI 진입점
+data-migrator/
+├── src/
+│   ├── mysql_migration/       # MySQL 마이그레이션 도구
+│   │   ├── config.py          # 소스/타겟 DB 설정 (pydantic-settings)
+│   │   ├── migrator.py        # 비동기 마이그레이션 핵심 로직
+│   │   └── cli.py             # CLI 진입점
+│   │
+│   └── trino_migration/       # Trino 마이그레이션 도구
+│       ├── config.py          # 소스/타겟 Trino + S3 설정
+│       ├── client.py          # Trino 클라이언트 래퍼
+│       ├── extractor.py       # 메타데이터 추출 (DDL, 파티션)
+│       ├── s3_copier.py       # S3 데이터 복사 (boto3)
+│       ├── migrator.py        # 마이그레이션 오케스트레이터
+│       └── cli.py             # CLI 진입점
 │
-├── scripts/migration/         # 데이터 마이그레이션 도구
-│   ├── config.py              # 마이그레이션 설정 (pydantic-settings)
-│   ├── migrate.py             # 마이그레이션 실행 스크립트
-│   └── migration_tables.json  # 마이그레이션 대상 테이블 목록
+├── docker/                    # Docker 테스트 환경
+│   ├── hive/                  # Hive Metastore 설정
+│   ├── trino/                 # Trino 설정
+│   └── localstack/            # LocalStack 초기화 (S3)
 │
-└── docker/                    # Docker 초기화 스크립트
+└── docs/
+    └── trino-migration.md     # Trino 마이그레이션 가이드
 ```
 
 ## Development Commands
@@ -32,68 +40,102 @@ oncall-claude/
 uv venv && source .venv/bin/activate
 uv pip install -e .
 
-# 테스트 환경 (Docker)
-docker compose up -d                    # MySQL 3307, PostgreSQL 5433
-cp .env.test .env                       # 테스트 환경 설정 적용
+# Docker 테스트 환경
+docker compose up -d                    # 전체 환경 시작
+docker compose up -d mysql localstack   # 필요한 서비스만
 
-# DAG 검증 CLI 실행
-airflow-validator check-connection      # DB/API 연결 확인
-airflow-validator validate -d 2024-01-15  # 검증 실행 (기본: REST API)
-airflow-validator validate --use-db     # PostgreSQL 직접 조회
-airflow-validator show-mapping          # Provider→DAG 매핑 확인
+# MySQL 마이그레이션
+mysql-migrate show-config               # 현재 설정 확인
+mysql-migrate init                      # 예시 YAML 설정 파일 생성
+mysql-migrate run migration.yaml        # YAML 기반 마이그레이션
+mysql-migrate run migration.yaml --dry-run
 
-# 데이터 마이그레이션 (환경변수 사용)
-cd scripts/migration
-python migrate.py --show-config         # 현재 설정 확인
-python migrate.py --config migration_tables.json --dry-run  # 설정 확인
-python migrate.py --config migration_tables.json            # 실행
+# Trino 마이그레이션
+trino-migrate show-config               # 현재 설정 확인
+trino-migrate analyze -c hive -s my_schema  # 소스 환경 분석
+trino-migrate analyze -c hive -s my_schema -t my_table --show-ddl
 
-# 데이터 마이그레이션 (CLI 인자로 오버라이드)
-python migrate.py \
-  --source-host <prod-host> --source-database laplace \
-  --target-host localhost --target-port 3307 --target-database laplace \
-  --table users --where "created_at >= '2024-01-01'"
+# CLI로 마이그레이션
+trino-migrate migrate -c hive -s my_schema
+trino-migrate migrate -c hive -s my_schema -t users -t orders
+trino-migrate migrate -c hive -s my_schema --method insert_select --where "dt >= '2024-01-01'"
+trino-migrate migrate -c hive -s my_schema --partition-filter "dt >= '2024-01-01'"
+trino-migrate migrate -c hive -s my_schema --target-catalog iceberg --dry-run
+
+# YAML로 마이그레이션
+trino-migrate init                      # 예시 YAML 생성
+trino-migrate run migration.yaml
+trino-migrate run migration.yaml --dry-run
 ```
 
 ## Architecture
 
+### MySQL Migration
+
 ```
-MySQL (laplace DB)     →  Airflow 조회           →  XLSX
-동기화 실패 데이터        [기본] REST API          검증 리포트
-(SYNC_FAILURE_QUERY)     [--use-db] PostgreSQL
+소스 MySQL  →  aiomysql (비동기)  →  타겟 MySQL
+            └─ 병렬 테이블 처리
+            └─ FK 기반 자동 순서 정렬
+            └─ 스트리밍 + 배치 INSERT
 ```
 
-### DAG Validator Components
+### Trino Migration
 
-- **`services/dag_query.py`**: MySQL 쿼리 실행, `PROVIDER_DAG_MAPPING` dict로 Provider→DAG ID 변환
-- **`services/failure_checker.py`**: `FailureCheckerBase` 추상 클래스, `APIFailureChecker`(REST API)와 `DBFailureChecker`(PostgreSQL) 구현체
-- **`api/airflow_client.py`**: Airflow 2.6.1 REST API 클라이언트 (httpx 사용)
-- **`db/postgres_client.py`**: Airflow 메타데이터 DB 직접 조회, `dag_run.conf` Pickle 디코딩 처리
-- **`exporters/xlsx_exporter.py`**: 4개 시트 생성 (Sync Failures, DAG Run Summary, Failed Tasks, DAG Configs)
-- **`config.py`**: pydantic-settings 기반, `.env` 파일에서 자동 로드
+```
+소스 Trino  →  S3 복사 (boto3)      →  타겟 Trino
+            │  └─ 파티션 필터링
+            │  └─ 병렬 복사
+            │
+            └─ INSERT SELECT (대안)  →  타겟 Trino
+               └─ WHERE 조건 지원
+               └─ CTAS 방식
+```
 
-### Migration Components
+#### 마이그레이션 방식
 
-- **`scripts/migration/config.py`**: 소스/타겟 DB 설정 (pydantic-settings)
-- **`scripts/migration/migrate.py`**: 마이그레이션 실행, WHERE 조건 필수
-- **`migration_tables.json`**: 마이그레이션 대상 테이블 및 조건 설정
+| 방식 | 장점 | 단점 | 사용 시점 |
+|------|------|------|-----------|
+| **S3 복사** | 빠름, Trino 부하 없음 | 동일 S3 접근 필요 | 대용량, 파티션 단위 |
+| **INSERT SELECT** | WHERE 조건 지원 | Trino 부하, 느림 | 조건부 추출 |
+
+### Docker 테스트 환경
+
+| 서비스 | 포트 | 용도 |
+|--------|------|------|
+| MySQL | 3307 | 마이그레이션 타겟 |
+| PostgreSQL | 5433 | Hive Metastore 백엔드 |
+| LocalStack | 4566 | S3 |
+| Hive Metastore | 9083 | 테이블 메타데이터 |
+| Trino | 8080 | 분산 SQL 쿼리 |
 
 ### Environment Variables
 
 ```bash
-# DAG Validator
-MYSQL_*          # 동기화 결과 DB (laplace)
-AIRFLOW_API_*    # Airflow REST API (기본 조회 방식)
-POSTGRES_*       # Airflow 메타데이터 DB (--use-db 옵션용)
+# MySQL Migration
+SOURCE_DB_*      # 소스 DB
+TARGET_DB_*      # 타겟 DB
 
-# Migration
-SOURCE_DB_*      # 소스 DB (마이그레이션 원본)
-TARGET_DB_*      # 타겟 DB (마이그레이션 대상)
+# Trino Migration
+SOURCE_TRINO_*   # 소스 Trino (HOST, PORT, USER)
+TARGET_TRINO_*   # 타겟 Trino (HOST, PORT, USER)
+
+# S3
+S3_TARGET_BUCKET         # 타겟 S3 버킷
+S3_AWS_PROFILE           # AWS 프로필
+S3_AWS_REGION            # AWS 리전
+S3_SOURCE_ENDPOINT_URL   # 소스 S3 endpoint (LocalStack용)
+S3_TARGET_ENDPOINT_URL   # 타겟 S3 endpoint (LocalStack용)
 ```
 
 ## Important Notes
 
-- `PROVIDER_DAG_MAPPING` (dag_query.py:10-18)은 테스트용 샘플 - 실제 매핑값으로 교체 필요
-- Tailscale 연결 필요 시: `sudo tailscale up --accept-routes`
-- MySQL 외래키 참조 테이블이 있어 마이그레이션 시 FK 검사 비활성화 고려
-- 마이그레이션은 반드시 WHERE 조건 필요 (전체 데이터 마이그레이션 방지)
+### Trino Migration
+- **카탈로그 필수**: 모든 테이블/스키마 설정에 `catalog` 필드 필수
+- **S3 권한**: S3 복사 방식 사용 시 소스/타겟 S3 버킷 접근 권한 필요
+- **파티션 동기화**: S3 복사 후 `sync_partition_metadata` 자동 실행
+- **기존 테이블 덮어쓰기**: 타겟에 동일 테이블 존재 시 DROP 후 재생성
+
+### MySQL Migration
+- 외래키 참조 테이블은 자동으로 FK 기반 순서 정렬됨
+- 날짜 suffix 테이블 (예: `table_20240101`)은 기본 제외
+- YAML 설정으로 여러 DB 병렬 마이그레이션 가능
