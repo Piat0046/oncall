@@ -85,7 +85,14 @@ class MetadataExtractor:
 
         console.print(f"  [dim]메타데이터 추출: {catalog}.{schema}.{table}[/dim]")
 
-        ddl = self.client.get_table_ddl(schema, table, catalog)
+        try:
+            ddl = self.client.get_table_ddl(schema, table, catalog)
+        except Exception as e:
+            # MATERIALIZED VIEW 등 DDL 조회 불가한 경우 스킵
+            if "materialized view" in str(e).lower():
+                console.print(f"  [yellow]스킵: {catalog}.{schema}.{table} (MATERIALIZED VIEW)[/yellow]")
+                return None
+            raise
         location = self.client.get_table_location(schema, table, catalog)
         file_format = self.client.get_table_format(schema, table, catalog)
         partition_columns = self.client.get_partition_columns(schema, table, catalog)
@@ -151,6 +158,17 @@ class MetadataExtractor:
         console.print(f"  총 {len(metadata.tables)}개 테이블 추출 완료")
         return metadata
 
+    # 버전별로 호환되지 않을 수 있는 Iceberg 테이블 속성들
+    INCOMPATIBLE_PROPERTIES = [
+        "max_commit_retry",
+        "commit_retry_min_wait_ms",
+        "commit_retry_max_wait_ms",
+        "commit_num_retries",
+        "commit_total_retry_time_ms",
+        "write_parallelism",
+        "target_max_file_size_bytes",
+    ]
+
     def generate_target_ddl(
         self,
         metadata: TableMetadata,
@@ -159,7 +177,7 @@ class MetadataExtractor:
         target_table: str | None = None,
         target_location: str | None = None,
     ) -> str:
-        """타겟용 DDL 생성 (location 변경)"""
+        """타겟용 DDL 생성 (location 변경, 호환되지 않는 속성 제거)"""
         ddl = metadata.ddl
 
         # 카탈로그/스키마/테이블명 변경
@@ -175,30 +193,34 @@ class MetadataExtractor:
             flags=re.IGNORECASE,
         )
 
-        # location 변경 (Iceberg는 location, Hive는 external_location 사용)
-        if target_location and metadata.location:
-            is_iceberg = "iceberg" in target_catalog.lower()
-
-            if is_iceberg:
-                # Iceberg: external_location → location 으로 변환
-                ddl = re.sub(
-                    rf"external_location\s*=\s*'[^']+'",
-                    f"location = '{target_location}'",
-                    ddl,
-                    flags=re.IGNORECASE,
-                )
-            else:
-                # Hive: external_location 유지
-                ddl = re.sub(
-                    rf"(external_location\s*=\s*')[^']+(')",
-                    rf"\g<1>{target_location}\g<2>",
-                    ddl,
-                    flags=re.IGNORECASE,
-                )
-
-            # LOCATION 키워드도 변경 (Hive external table용)
+        # 호환되지 않는 속성 제거
+        for prop in self.INCOMPATIBLE_PROPERTIES:
+            # 속성 = 값 형태 제거 (숫자, 문자열 모두 지원)
             ddl = re.sub(
-                rf"(LOCATION\s+')[^']+(')",
+                rf",?\s*{prop}\s*=\s*(?:'[^']*'|\d+)",
+                "",
+                ddl,
+                flags=re.IGNORECASE,
+            )
+
+        # 빈 WITH () 정리 - WITH ( ) 또는 WITH (  ,  ) 형태 제거
+        ddl = re.sub(r"WITH\s*\(\s*,", "WITH (", ddl)  # WITH ( , ... → WITH ( ...
+        ddl = re.sub(r",\s*\)", ")", ddl)  # ... , ) → ... )
+        ddl = re.sub(r"WITH\s*\(\s*\)", "", ddl)  # 빈 WITH () 제거
+
+        # location 변경
+        if target_location and metadata.location:
+            # 모든 location 패턴 변경 (location = '...', external_location = '...', LOCATION '...')
+            # s3a:// 도 s3:// 로 변환
+            ddl = re.sub(
+                r"((?:external_)?location\s*=\s*')[^']+(')",
+                rf"\g<1>{target_location}\g<2>",
+                ddl,
+                flags=re.IGNORECASE,
+            )
+            # LOCATION '...' 형태 (Hive external table)
+            ddl = re.sub(
+                r"(LOCATION\s+')[^']+(')",
                 rf"\g<1>{target_location}\g<2>",
                 ddl,
                 flags=re.IGNORECASE,

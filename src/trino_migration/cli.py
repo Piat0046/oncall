@@ -59,7 +59,9 @@ def show_config():
 @click.option("--table", "-t", "table_name", default=None, help="특정 테이블만 분석")
 @click.option("--show-ddl", is_flag=True, help="DDL 출력")
 @click.option("--show-partitions", is_flag=True, help="파티션 정보 출력")
-def analyze(host, port, user, catalog, schema_name, table_name, show_ddl, show_partitions):
+def analyze(
+    host, port, user, catalog, schema_name, table_name, show_ddl, show_partitions
+):
     """소스 Trino 환경 분석
 
     예시:
@@ -79,12 +81,18 @@ def analyze(host, port, user, catalog, schema_name, table_name, show_ddl, show_p
     try:
         if table_name:
             # 단일 테이블 분석
-            metadata = extractor.extract_table_metadata(catalog, schema_name, table_name)
+            metadata = extractor.extract_table_metadata(
+                catalog, schema_name, table_name
+            )
 
-            console.print(f"\n[bold]테이블: {catalog}.{schema_name}.{table_name}[/bold]")
+            console.print(
+                f"\n[bold]테이블: {catalog}.{schema_name}.{table_name}[/bold]"
+            )
             console.print(f"  Location: {metadata.location or 'N/A'}")
             console.print(f"  Format: {metadata.file_format or 'N/A'}")
-            console.print(f"  파티션 컬럼: {', '.join(metadata.partition_columns) or 'None'}")
+            console.print(
+                f"  파티션 컬럼: {', '.join(metadata.partition_columns) or 'None'}"
+            )
             console.print(f"  파티션 수: {len(metadata.partitions)}")
 
             if show_ddl:
@@ -111,10 +119,14 @@ def analyze(host, port, user, catalog, schema_name, table_name, show_ddl, show_p
             table.add_column("파티션")
 
             for t in schema_meta.tables:
-                partition_info = ", ".join(t.partition_columns) if t.partition_columns else "-"
+                partition_info = (
+                    ", ".join(t.partition_columns) if t.partition_columns else "-"
+                )
                 table.add_row(
                     t.table_name,
-                    t.location[:50] + "..." if t.location and len(t.location) > 50 else (t.location or "N/A"),
+                    t.location[:50] + "..."
+                    if t.location and len(t.location) > 50
+                    else (t.location or "N/A"),
                     t.file_format or "N/A",
                     partition_info,
                 )
@@ -133,17 +145,34 @@ def analyze(host, port, user, catalog, schema_name, table_name, show_ddl, show_p
 @click.option("--target-host", default=None, help="타겟 Trino 호스트")
 @click.option("--target-port", type=int, default=None, help="타겟 Trino 포트")
 @click.option("--target-user", default=None, help="타겟 Trino 사용자")
-@click.option("--target-catalog", default=None, help="타겟 카탈로그 (기본: 소스와 동일)")
-@click.option("--schema", "-s", "schema_name", required=True, help="마이그레이션할 스키마")
-@click.option("--table", "-t", "table_names", multiple=True, help="특정 테이블만 마이그레이션")
+@click.option(
+    "--target-catalog", default=None, help="타겟 카탈로그 (기본: 소스와 동일)"
+)
+@click.option(
+    "--schema", "-s", "schema_name", required=True, help="마이그레이션할 스키마"
+)
+@click.option(
+    "--table", "-t", "table_names", multiple=True, help="특정 테이블만 마이그레이션"
+)
 @click.option("--exclude", "-e", "exclude_tables", multiple=True, help="제외할 테이블")
-@click.option("--method", type=click.Choice(["s3_copy", "insert_select"]), default="s3_copy", help="마이그레이션 방식")
-@click.option("--where", "where_clause", default=None, help="WHERE 조건 (insert_select용)")
+@click.option(
+    "--method",
+    type=click.Choice(["s3_copy", "insert_select"]),
+    default="s3_copy",
+    help="마이그레이션 방식",
+)
+@click.option(
+    "--where", "where_clause", default=None, help="WHERE 조건 (insert_select용)"
+)
 @click.option("--partition-filter", multiple=True, help="파티션 필터 (s3_copy용)")
 @click.option("--target-schema", default=None, help="타겟 스키마명")
 @click.option("--target-bucket", default=None, help="타겟 S3 버킷")
 @click.option("--aws-profile", default=None, help="AWS 프로필")
 @click.option("--parallel", type=int, default=3, help="병렬 테이블 수")
+@click.option(
+    "--parallel-inserts", type=int, default=4, help="INSERT 병렬 수 (insert_select용)"
+)
+@click.option("--batch-size", type=int, default=1000, help="INSERT 배치 크기")
 @click.option("--dry-run", is_flag=True, help="실제 마이그레이션 없이 확인만")
 def migrate(
     source_host,
@@ -164,6 +193,8 @@ def migrate(
     target_bucket,
     aws_profile,
     parallel,
+    parallel_inserts,
+    batch_size,
     dry_run,
 ):
     """스키마/테이블 마이그레이션
@@ -213,12 +244,15 @@ def migrate(
         s3_copier=s3_copier,
         target_bucket=target_bucket or settings.s3.target_bucket,
         target_prefix=settings.s3.target_prefix,
+        batch_size=batch_size,
+        parallel_inserts=parallel_inserts,
     )
 
     try:
         if table_names:
             # 특정 테이블만
             from trino_migration.migrator import MigrationSummary
+
             summary = MigrationSummary()
 
             for table in table_names:
@@ -227,7 +261,9 @@ def migrate(
                     schema=schema_name,
                     table=table,
                     method=method,
-                    partition_filter=list(partition_filter) if partition_filter else None,
+                    partition_filter=list(partition_filter)
+                    if partition_filter
+                    else None,
                     where=where_clause,
                     target_catalog=target_catalog,
                     target_schema=target_schema,
@@ -279,18 +315,23 @@ def run(yaml_file, dry_run):
     # 마이그레이터 생성
     migrator = TrinoMigrator.from_settings()
 
-    # S3 버킷 오버라이드
+    # YAML 설정 오버라이드
     if yaml_config.target_bucket:
         migrator.target_bucket = yaml_config.target_bucket
+    migrator.batch_size = yaml_config.batch_size
+    migrator.parallel_inserts = yaml_config.parallel_inserts
 
     try:
         from trino_migration.migrator import MigrationSummary
+
         summary = MigrationSummary()
 
         # 개별 테이블 마이그레이션
         for table_config in yaml_config.tables:
             console.print(f"\n{'=' * 60}")
-            console.print(f"[bold]{table_config.catalog}.{table_config.schema_name}.{table_config.table}[/bold]")
+            console.print(
+                f"[bold]{table_config.catalog}.{table_config.schema_name}.{table_config.table}[/bold]"
+            )
             console.print(f"{'=' * 60}")
 
             result = migrator.migrate_table(
@@ -302,7 +343,9 @@ def run(yaml_file, dry_run):
         # 스키마 단위 마이그레이션
         for schema_config in yaml_config.schemas:
             console.print(f"\n{'=' * 60}")
-            console.print(f"[bold]스키마: {schema_config.catalog}.{schema_config.schema_name}[/bold]")
+            console.print(
+                f"[bold]스키마: {schema_config.catalog}.{schema_config.schema_name}[/bold]"
+            )
             console.print(f"{'=' * 60}")
 
             schema_summary = migrator.migrate_schema(
@@ -333,6 +376,8 @@ def init():
 # 전역 설정
 parallel_tables: 3        # 동시 테이블 처리 수
 parallel_partitions: 5    # 동시 파티션 처리 수
+parallel_inserts: 4       # INSERT 병렬 수 (insert_select 방식)
+batch_size: 1000          # INSERT 배치 크기
 dry_run: false
 
 # S3 설정 (환경변수 오버라이드)

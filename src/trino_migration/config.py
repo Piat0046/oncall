@@ -165,6 +165,8 @@ class MigrationYAMLConfig(BaseModel):
     # 전역 설정
     parallel_tables: int = 3
     parallel_partitions: int = 5
+    parallel_inserts: int = 4  # INSERT 병렬 수
+    batch_size: int = 1000  # INSERT 배치 크기
     dry_run: bool = False
 
     # S3 설정 오버라이드
@@ -196,6 +198,8 @@ def load_yaml_config(yaml_path: str | Path) -> MigrationYAMLConfig:
         schemas=schemas,
         parallel_tables=data.get("parallel_tables", 3),
         parallel_partitions=data.get("parallel_partitions", 5),
+        parallel_inserts=data.get("parallel_inserts", 4),
+        batch_size=data.get("batch_size", 1000),
         dry_run=data.get("dry_run", False),
         source_bucket=data.get("source_bucket"),
         target_bucket=data.get("target_bucket"),

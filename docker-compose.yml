@@ -47,22 +47,21 @@ services:
       - migrator-network
 
   # ============================================================
-  # LocalStack (AWS 서비스 에뮬레이션: S3, SecretsManager, SQS)
+  # LocalStack (S3 호환 오브젝트 스토리지)
   # ============================================================
   localstack:
-    image: localstack/localstack:3.0
+    image: localstack/localstack:latest
     container_name: migrator-localstack
     environment:
-      SERVICES: s3,secretsmanager,sqs
+      SERVICES: s3
       DEBUG: 0
-      PERSISTENCE: 1
-      AWS_DEFAULT_REGION: ap-northeast-2
+      DATA_DIR: /var/lib/localstack/data
+      AWS_DEFAULT_REGION: us-east-1
     ports:
-      - "11003:4566"
+      - "11003:4566"   # LocalStack Gateway
     volumes:
       - ./data/localstack:/var/lib/localstack
-      - ./docker/localstack/init:/etc/localstack/init/ready.d
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 10s
@@ -90,21 +89,28 @@ services:
       DATABASE_PASSWORD: hive123
       DATABASE_TYPE: postgres
       S3_ENDPOINT_URL: http://localstack:4566
-      S3_BUCKET: laplace-dashboard
+      S3_BUCKET: ${HIVE_S3_BUCKET:-warehouse}
       S3_PREFIX: warehouse
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      JAVA_TOOL_OPTIONS: "-Xmx${HIVE_METASTORE_MEMORY:-4G}"
     ports:
       - "11001:9083"
+    deploy:
+      resources:
+        limits:
+          memory: ${HIVE_METASTORE_MEMORY_LIMIT:-5G}
     networks:
       - migrator-network
 
   # ============================================================
-  # Trino (분산 SQL 쿼리 엔진)
+  # Trino Coordinator (분산 SQL 쿼리 엔진 - 코디네이터)
   # ============================================================
-  trino:
-    image: trinodb/trino:439
-    container_name: migrator-trino
+  trino-coordinator:
+    image: trinodb/trino:479
+    container_name: migrator-trino-coordinator
+    hostname: trino-coordinator
     depends_on:
       - hive-metastore
       - localstack
@@ -112,17 +118,52 @@ services:
     ports:
       - "11000:8080"
     volumes:
-      - ./docker/trino/etc:/etc/trino:ro
-      - ./data/trino:/data/trino
+      - ./docker/trino/etc/coordinator:/etc/trino
+      - ./docker/trino/entrypoint.sh:/usr/local/bin/trino-entrypoint.sh:ro
+      - ./data/trino/coordinator:/data/trino
+    entrypoint: ["/usr/local/bin/trino-entrypoint.sh"]
     environment:
-      # JVM 메모리 설정 (docker memory limit의 80% 권장)
-      JAVA_TOOL_OPTIONS: "-Xmx${TRINO_JVM_MEMORY:-4G}"
+      JAVA_TOOL_OPTIONS: "-Xmx${TRINO_COORDINATOR_MEMORY:-2G}"
+      AWS_DEFAULT_REGION: us-east-1
+      # Query memory settings
+      TRINO_QUERY_MAX_MEMORY: ${TRINO_QUERY_MAX_MEMORY:-4GB}
+      TRINO_QUERY_MAX_MEMORY_PER_NODE_COORDINATOR: ${TRINO_QUERY_MAX_MEMORY_PER_NODE_COORDINATOR:-1GB}
     deploy:
       resources:
         limits:
-          memory: ${TRINO_MEMORY_LIMIT:-6G}
-        reservations:
-          memory: ${TRINO_MEMORY_RESERVATION:-4G}
+          memory: ${TRINO_COORDINATOR_MEMORY_LIMIT:-3G}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - migrator-network
+
+  # ============================================================
+  # Trino Worker (분산 SQL 쿼리 엔진 - 워커)
+  # TRINO_WORKERS 환경변수로 워커 수 조절 (기본: 1)
+  # ============================================================
+  trino-worker:
+    image: trinodb/trino:479
+    depends_on:
+      trino-coordinator:
+        condition: service_healthy
+    volumes:
+      - ./docker/trino/etc/worker:/etc/trino
+      - ./docker/trino/entrypoint.sh:/usr/local/bin/trino-entrypoint.sh:ro
+    entrypoint: ["/usr/local/bin/trino-entrypoint.sh"]
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx${TRINO_WORKER_MEMORY:-2G}"
+      AWS_DEFAULT_REGION: us-east-1
+      # Query memory settings
+      TRINO_QUERY_MAX_MEMORY: ${TRINO_QUERY_MAX_MEMORY:-4GB}
+      TRINO_QUERY_MAX_MEMORY_PER_NODE_WORKER: ${TRINO_QUERY_MAX_MEMORY_PER_NODE_WORKER:-512MB}
+    deploy:
+      replicas: ${TRINO_WORKERS:-1}
+      resources:
+        limits:
+          memory: ${TRINO_WORKER_MEMORY_LIMIT:-3G}
     networks:
       - migrator-network
 

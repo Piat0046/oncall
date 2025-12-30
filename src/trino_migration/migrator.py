@@ -4,8 +4,13 @@ S3 복사 + 메타데이터 등록 또는 INSERT SELECT 방식 지원
 """
 
 import asyncio
+import random
 import re
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Literal
 
 from rich.console import Console
@@ -84,6 +89,8 @@ class TrinoMigrator:
         target_bucket: str,
         target_prefix: str = "",
         cache_dir: str = "./cache",
+        batch_size: int = 1000,
+        parallel_inserts: int = 4,
     ):
         self.source_client = source_client
         self.target_client = target_client
@@ -92,6 +99,8 @@ class TrinoMigrator:
         self.target_prefix = target_prefix
         self.extractor = MetadataExtractor(source_client)
         self.cache = DataCache(cache_dir)
+        self.batch_size = batch_size
+        self.parallel_inserts = parallel_inserts
 
     @classmethod
     def from_settings(cls) -> "TrinoMigrator":
@@ -165,12 +174,18 @@ class TrinoMigrator:
                 error=f"S3 경로 파싱 실패: {metadata.location}",
             )
 
-        # 타겟 경로 생성
-        target_prefix = f"{self.target_prefix}/{schema}/{table}".lstrip("/")
+        # 타겟 경로 생성 (소스 경로 구조 그대로 유지, 버킷만 변경)
+        target_prefix = source_prefix
         target_location = f"s3://{self.target_bucket}/{target_prefix}"
 
         console.print(f"  소스: s3://{source_bucket}/{source_prefix}")
         console.print(f"  타겟: {target_location}")
+
+        # 타겟 경로 비우기 (기존 파일 삭제)
+        if not dry_run:
+            deleted = self.s3_copier.delete_prefix(self.target_bucket, target_prefix)
+            if deleted > 0:
+                console.print(f"  [dim]기존 파일 {deleted}개 삭제[/dim]")
 
         total_files = 0
         total_bytes = 0
@@ -208,23 +223,17 @@ class TrinoMigrator:
             )
             total_files = result.files_copied
             total_bytes = result.bytes_copied
+            if result.status == "skipped":
+                console.print(f"  [yellow]S3 파일 없음: {result.error}[/yellow]")
 
         # 타겟에 테이블 생성
         if not dry_run:
             try:
-                # 스키마 생성 (location 지정 시 Hive Metastore 오류 발생하므로 기본 경로 사용)
+                # 스키마 생성 (올바른 location 지정)
                 if not self.target_client.schema_exists(schema, target_catalog):
-                    self.target_client.create_schema(schema, catalog=target_catalog)
-                    console.print(f"  [green]스키마 생성: {target_catalog}.{schema}[/green]")
-
-                # DDL 생성 및 실행
-                target_ddl = self.extractor.generate_target_ddl(
-                    metadata,
-                    target_catalog=target_catalog,
-                    target_schema=schema,
-                    target_table=table,
-                    target_location=target_location,
-                )
+                    schema_location = f"s3a://{self.target_bucket}/{self.target_prefix or 'warehouse'}/{schema}.db"
+                    self.target_client.create_schema(schema, location=schema_location, catalog=target_catalog)
+                    console.print(f"  [green]스키마 생성: {target_catalog}.{schema} ({schema_location})[/green]")
 
                 # 기존 테이블 존재 시 DROP
                 if self.target_client.table_exists(schema, table, target_catalog):
@@ -233,21 +242,40 @@ class TrinoMigrator:
                         fetch=False,
                     )
 
-                self.target_client.execute(target_ddl, fetch=False)
-                console.print(f"  [green]테이블 생성 완료[/green]")
+                is_iceberg = "iceberg" in target_catalog.lower()
 
-                # 파티션 복구 (MSCK REPAIR TABLE)
-                if metadata.is_partitioned:
-                    try:
-                        self.target_client.execute(
-                            f"CALL {target_catalog}.system.sync_partition_metadata('{schema}', '{table}', 'FULL')",
-                            fetch=False,
-                        )
-                        console.print(f"  [green]파티션 동기화 완료[/green]")
-                    except Exception as e:
-                        console.print(f"  [yellow]파티션 동기화 경고: {e}[/yellow]")
+                if is_iceberg:
+                    # Iceberg: register_table 프로시저 사용 (기존 메타데이터 활용)
+                    self.target_client.execute(
+                        f"CALL {target_catalog}.system.register_table('{schema}', '{table}', '{target_location}')",
+                        fetch=False,
+                    )
+                    console.print(f"  [green]테이블 등록 완료 (register_table)[/green]")
+                else:
+                    # Hive: DDL로 테이블 생성
+                    target_ddl = self.extractor.generate_target_ddl(
+                        metadata,
+                        target_catalog=target_catalog,
+                        target_schema=schema,
+                        target_table=table,
+                        target_location=target_location,
+                    )
+                    self.target_client.execute(target_ddl, fetch=False)
+                    console.print(f"  [green]테이블 생성 완료[/green]")
+
+                    # 파티션 복구 (Hive만)
+                    if metadata.is_partitioned:
+                        try:
+                            self.target_client.execute(
+                                f"CALL {target_catalog}.system.sync_partition_metadata('{schema}', '{table}', 'FULL')",
+                                fetch=False,
+                            )
+                            console.print(f"  [green]파티션 동기화 완료[/green]")
+                        except Exception as e:
+                            console.print(f"  [yellow]파티션 동기화 경고: {e}[/yellow]")
 
             except Exception as e:
+                console.print(f"  [red]테이블 생성 실패: {e}[/red]")
                 return MigrationResult(
                     catalog=target_catalog,
                     schema_name=schema,
@@ -284,6 +312,8 @@ class TrinoMigrator:
         dry_run: bool = False,
         use_cache: bool = True,
         delete_cache_on_success: bool = False,
+        batch_size: int = 1000,
+        parallel_inserts: int = 4,
     ) -> MigrationResult:
         """캐시 기반 INSERT SELECT 방식으로 테이블 마이그레이션
 
@@ -366,10 +396,11 @@ class TrinoMigrator:
         try:
             is_iceberg = "iceberg" in target_catalog.lower()
 
-            # 타겟 스키마 생성 (location 없이 - Hive Metastore S3 경로 생성 문제 회피)
+            # 타겟 스키마 생성 (올바른 location 지정)
             if not self.target_client.schema_exists(tgt_schema, target_catalog):
-                self.target_client.create_schema(tgt_schema, catalog=target_catalog)
-                console.print(f"  [green]스키마 생성: {target_catalog}.{tgt_schema}[/green]")
+                schema_location = f"s3a://{self.target_bucket}/{self.target_prefix or 'warehouse'}/{tgt_schema}.db"
+                self.target_client.create_schema(tgt_schema, location=schema_location, catalog=target_catalog)
+                console.print(f"  [green]스키마 생성: {target_catalog}.{tgt_schema} ({schema_location})[/green]")
 
             # 기존 테이블 DROP
             if self.target_client.table_exists(tgt_schema, tgt_table, target_catalog):
@@ -399,11 +430,102 @@ class TrinoMigrator:
             self.target_client.execute(create_query, fetch=False)
             console.print(f"  [green]테이블 생성: {target_full}[/green]")
 
-            # 데이터 INSERT (배치)
+            # 데이터 INSERT (병렬 배치)
             if data:
-                batch_size = 1000
+                import json
                 total_batches = (len(data) + batch_size - 1) // batch_size
                 inserted = 0
+                insert_lock = Lock()
+                errors = []
+
+                def build_values_clause(batch: list[dict]) -> tuple[list[str], str]:
+                    """VALUES 절 생성"""
+                    col_names = list(batch[0].keys())
+                    values_list = []
+                    for row in batch:
+                        vals = []
+                        for col in col_names:
+                            val = row.get(col)
+                            if val is None:
+                                vals.append("NULL")
+                            elif isinstance(val, str):
+                                escaped = val.replace("'", "''")
+                                vals.append(f"'{escaped}'")
+                            elif isinstance(val, bool):
+                                vals.append("true" if val else "false")
+                            elif isinstance(val, (int, float)):
+                                vals.append(str(val))
+                            elif isinstance(val, (dict, list)):
+                                escaped = json.dumps(val, ensure_ascii=False).replace("'", "''")
+                                vals.append(f"'{escaped}'")
+                            elif hasattr(val, 'isoformat'):
+                                ts_str = val.isoformat().replace('T', ' ')
+                                vals.append(f"TIMESTAMP '{ts_str}'")
+                            else:
+                                escaped = str(val).replace("'", "''")
+                                vals.append(f"'{escaped}'")
+                        values_list.append(f"({', '.join(vals)})")
+                    return col_names, ', '.join(values_list)
+
+                def execute_batch(batch_data: list[dict], batch_idx: int) -> int:
+                    """배치 INSERT 실행 (별도 커넥션, 재시도 로직 포함)"""
+                    if not batch_data:
+                        return 0
+
+                    # 재시도 설정 (Iceberg 권장사항 기반)
+                    max_retries = 8
+                    min_wait_ms = 200
+                    max_wait_ms = 120000
+
+                    col_names, values_clause = build_values_clause(batch_data)
+                    insert_query = f"""
+                        INSERT INTO {target_full} ({', '.join([f'"{c}"' for c in col_names])})
+                        VALUES {values_clause}
+                    """
+
+                    for attempt in range(max_retries):
+                        client = None
+                        try:
+                            # 각 스레드별 새 커넥션 생성
+                            client = TrinoClient(
+                                host=settings.target.host,
+                                port=settings.target.port,
+                                user=settings.target.user,
+                                catalog=target_catalog,
+                            )
+                            client.execute(insert_query, fetch=False)
+                            client.close()
+                            return len(batch_data)
+                        except Exception as e:
+                            if client:
+                                try:
+                                    client.close()
+                                except:
+                                    pass
+
+                            error_str = str(e).lower()
+                            # Iceberg 메타데이터 충돌 감지
+                            is_commit_conflict = (
+                                "commitfailed" in error_str or
+                                "metadata location" in error_str or
+                                "commit" in error_str and "conflict" in error_str
+                            )
+
+                            if is_commit_conflict and attempt < max_retries - 1:
+                                # 지수 백오프 + 랜덤 지터
+                                wait_ms = min(min_wait_ms * (2 ** attempt), max_wait_ms)
+                                jitter = random.uniform(0.5, 1.5)
+                                wait_sec = (wait_ms * jitter) / 1000
+                                time.sleep(wait_sec)
+                                continue
+                            else:
+                                # 재시도 불가능하거나 마지막 시도 실패
+                                errors.append(f"Batch {batch_idx} (attempt {attempt + 1}/{max_retries}): {e}")
+                                return 0
+                    return 0
+
+                # 배치 분할
+                batches = [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
 
                 insert_progress = Progress(
                     SpinnerColumn(),
@@ -417,54 +539,26 @@ class TrinoMigrator:
 
                 with insert_progress:
                     insert_task = insert_progress.add_task(
-                        f"INSERT {tgt_table}", total=len(data)
+                        f"INSERT {tgt_table} ({parallel_inserts}P)", total=len(data)
                     )
 
-                    for i in range(0, len(data), batch_size):
-                        batch = data[i:i + batch_size]
-                        if not batch:
-                            continue
+                    with ThreadPoolExecutor(max_workers=parallel_inserts) as executor:
+                        futures = {
+                            executor.submit(execute_batch, batch, idx): idx
+                            for idx, batch in enumerate(batches)
+                        }
+                        for future in as_completed(futures):
+                            count = future.result()
+                            with insert_lock:
+                                inserted += count
+                                insert_progress.update(insert_task, completed=inserted)
 
-                        # VALUES 절 생성
-                        col_names = list(batch[0].keys())
-                        values_list = []
-                        for row in batch:
-                            vals = []
-                            for col in col_names:
-                                val = row.get(col)
-                                if val is None:
-                                    vals.append("NULL")
-                                elif isinstance(val, str):
-                                    # 문자열은 이스케이프 후 따옴표로 감싸기
-                                    escaped = val.replace("'", "''")
-                                    vals.append(f"'{escaped}'")
-                                elif isinstance(val, bool):
-                                    vals.append("true" if val else "false")
-                                elif isinstance(val, (int, float)):
-                                    vals.append(str(val))
-                                elif isinstance(val, (dict, list)):
-                                    # JSON 타입
-                                    import json
-                                    escaped = json.dumps(val, ensure_ascii=False).replace("'", "''")
-                                    vals.append(f"'{escaped}'")
-                                elif hasattr(val, 'isoformat'):
-                                    # datetime, date, time 타입 (Trino는 'T' 대신 공백 사용)
-                                    ts_str = val.isoformat().replace('T', ' ')
-                                    vals.append(f"TIMESTAMP '{ts_str}'")
-                                else:
-                                    # 기타 타입은 문자열로
-                                    escaped = str(val).replace("'", "''")
-                                    vals.append(f"'{escaped}'")
-                            values_list.append(f"({', '.join(vals)})")
-
-                        insert_query = f"""
-                            INSERT INTO {target_full} ({', '.join([f'"{c}"' for c in col_names])})
-                            VALUES {', '.join(values_list)}
-                        """
-                        self.target_client.execute(insert_query, fetch=False)
-                        inserted += len(batch)
-                        insert_progress.update(insert_task, completed=inserted)
-
+                if errors:
+                    console.print(f"  [yellow]일부 배치 실패: {len(errors)}개[/yellow]")
+                    for err in errors[:5]:  # 최대 5개까지 출력
+                        console.print(f"    [red]{err}[/red]")
+                    if len(errors) > 5:
+                        console.print(f"    [yellow]...외 {len(errors) - 5}개 에러[/yellow]")
                 console.print(f"  [green]INSERT 완료: {inserted:,}건[/green]")
             else:
                 inserted = 0
@@ -485,6 +579,7 @@ class TrinoMigrator:
 
         except Exception as e:
             console.print(f"  [red]타겟 INSERT 실패: {e}[/red]")
+            console.print(f"  [dim]{traceback.format_exc()}[/dim]")
             console.print(f"  [yellow]캐시는 유지됨 - 재시도 가능[/yellow]")
             return MigrationResult(
                 catalog=target_catalog,
@@ -520,7 +615,16 @@ class TrinoMigrator:
                 error="VIEW 또는 MATERIALIZED VIEW는 마이그레이션 불가",
             )
 
-        if config.method == "s3_copy":
+        # Iceberg 테이블은 S3 복사 불가 (메타데이터에 원본 경로가 하드코딩됨)
+        # 소스 또는 타겟이 Iceberg이면 자동으로 insert_select 방식 사용
+        is_iceberg_source = "iceberg" in config.catalog.lower()
+        is_iceberg_target = "iceberg" in (config.target_catalog or config.catalog).lower()
+        method = config.method
+        if (is_iceberg_source or is_iceberg_target) and method == "s3_copy":
+            console.print(f"  [yellow]Iceberg 테이블 → insert_select 방식으로 자동 전환[/yellow]")
+            method = "insert_select"
+
+        if method == "s3_copy":
             return self.migrate_table_s3_copy(
                 metadata=metadata,
                 target_catalog=target_catalog,
@@ -537,6 +641,8 @@ class TrinoMigrator:
                 target_table=config.target_table,
                 where=config.where,
                 dry_run=dry_run,
+                batch_size=self.batch_size,
+                parallel_inserts=self.parallel_inserts,
             )
 
     def migrate_schema(
@@ -553,8 +659,17 @@ class TrinoMigrator:
     ) -> MigrationSummary:
         """스키마 전체 마이그레이션 (테이블 단위 순차 처리)"""
         target_cat = target_catalog or catalog
+
+        # Iceberg 테이블은 S3 복사 불가 - 자동으로 insert_select 사용
+        is_iceberg_source = "iceberg" in catalog.lower()
+        is_iceberg_target = "iceberg" in target_cat.lower()
+        actual_method = method
+        if (is_iceberg_source or is_iceberg_target) and method == "s3_copy":
+            console.print(f"  [yellow]Iceberg 스키마 → insert_select 방식으로 자동 전환[/yellow]")
+            actual_method = "insert_select"
+
         console.print(f"\n[bold]스키마 마이그레이션: {catalog}.{schema} → {target_cat}.{target_schema or schema}[/bold]")
-        console.print(f"  방식: {method}")
+        console.print(f"  방식: {actual_method}")
 
         # 테이블 목록만 먼저 조회
         tables = self.source_client.get_tables(schema, catalog)
@@ -587,7 +702,7 @@ class TrinoMigrator:
                     continue
 
                 # 2. 바로 마이그레이션
-                if method == "s3_copy":
+                if actual_method == "s3_copy":
                     result = self.migrate_table_s3_copy(
                         metadata=table_meta,
                         target_catalog=target_cat,
@@ -601,6 +716,8 @@ class TrinoMigrator:
                         target_catalog=target_cat,
                         target_schema=target_schema,
                         dry_run=dry_run,
+                        batch_size=self.batch_size,
+                        parallel_inserts=self.parallel_inserts,
                     )
 
                 summary.results.append(result)

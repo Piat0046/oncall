@@ -48,3 +48,5 @@ htmlcov/
 
 # Docker data (bind mounts)
 data/
+cache/
+.zed/

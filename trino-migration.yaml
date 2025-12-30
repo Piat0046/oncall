@@ -4,9 +4,11 @@
 # ============================================================
 # 전역 설정
 # ============================================================
-parallel_tables: 3        # 동시 테이블 처리 수
-parallel_partitions: 5    # 동시 파티션 처리 수
-dry_run: false             # true로 설정하면 실제 마이그레이션 없이 확인만
+parallel_tables: 1 # 동시 테이블 처리 수
+parallel_partitions: 1 # 동시 파티션 처리 수
+parallel_inserts: 8 # INSERT 병렬 수 (Iceberg는 2 권장)
+batch_size: 3000 # INSERT 배치 크기
+dry_run: false # true로 설정하면 실제 마이그레이션 없이 확인만
 
 # S3 설정 (환경변수 오버라이드)
 # source_bucket: source-data-lake
@@ -65,11 +67,12 @@ schemas:
   # ---------------------------------------------------------
   # 스키마 전체 테이블 S3 복사 (일부 제외)
   # ---------------------------------------------------------
-  - catalog: iceberg             # 소스 카탈로그 (타겟도 동일)
+  - catalog: iceberg # 소스 카탈로그 (타겟도 동일)
     schema: laplacian_3
-    method: insert_select
+    method: s3_copy
     # target_catalog 미지정 시 소스와 동일한 카탈로그 사용
-    exclude:                   # 제외할 테이블
+    exclude: # 제외할 테이블
+
 
 #   # ---------------------------------------------------------
 #   # 다른 카탈로그로 마이그레이션 + 파티션 필터

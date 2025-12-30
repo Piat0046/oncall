@@ -291,3 +291,29 @@ class S3Copier:
         total_files = len(objects)
         total_size = sum(obj["size"] for obj in objects)
         return total_files, total_size
+
+    def delete_prefix(
+        self,
+        bucket: str,
+        prefix: str,
+        use_target: bool = True,
+    ) -> int:
+        """prefix 아래 모든 객체 삭제"""
+        s3 = self.target_s3 if use_target else self.source_s3
+        objects = self.list_objects(bucket, prefix, use_source=not use_target)
+
+        if not objects:
+            return 0
+
+        # 1000개씩 배치 삭제 (S3 API 제한)
+        deleted = 0
+        for i in range(0, len(objects), 1000):
+            batch = objects[i:i + 1000]
+            delete_objects = [{"Key": obj["key"]} for obj in batch]
+            s3.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": delete_objects},
+            )
+            deleted += len(batch)
+
+        return deleted
