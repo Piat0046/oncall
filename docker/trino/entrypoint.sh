@@ -7,9 +7,12 @@ CONFIG="${CONFIG_DIR}/config.properties"
 
 if [ -f "$TEMPLATE" ]; then
     cp "$TEMPLATE" "$CONFIG"
+    # Memory 설정
     sed -i "s|\${TRINO_QUERY_MAX_MEMORY}|${TRINO_QUERY_MAX_MEMORY:-4GB}|g" "$CONFIG"
     sed -i "s|\${TRINO_QUERY_MAX_MEMORY_PER_NODE_COORDINATOR}|${TRINO_QUERY_MAX_MEMORY_PER_NODE_COORDINATOR:-1GB}|g" "$CONFIG"
     sed -i "s|\${TRINO_QUERY_MAX_MEMORY_PER_NODE_WORKER}|${TRINO_QUERY_MAX_MEMORY_PER_NODE_WORKER:-512MB}|g" "$CONFIG"
+    # Coordinator 설정
+    sed -i "s|\${TRINO_INCLUDE_COORDINATOR}|${TRINO_INCLUDE_COORDINATOR:-true}|g" "$CONFIG"
     echo "Generated config.properties:"
     cat "$CONFIG"
 fi

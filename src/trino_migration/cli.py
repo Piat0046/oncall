@@ -154,6 +154,8 @@ def analyze(
 @click.option(
     "--table", "-t", "table_names", multiple=True, help="특정 테이블만 마이그레이션"
 )
+@click.option("--include", "-i", "include_tables", multiple=True, help="포함할 테이블 (정확히 매칭)")
+@click.option("--include-regex", "-r", "include_regex", multiple=True, help="포함할 테이블 (정규식 패턴)")
 @click.option("--exclude", "-e", "exclude_tables", multiple=True, help="제외할 테이블")
 @click.option(
     "--method",
@@ -173,6 +175,7 @@ def analyze(
     "--parallel-inserts", type=int, default=4, help="INSERT 병렬 수 (insert_select용)"
 )
 @click.option("--batch-size", type=int, default=1000, help="INSERT 배치 크기")
+@click.option("--stop-on-error", is_flag=True, help="에러 발생 시 즉시 중단")
 @click.option("--dry-run", is_flag=True, help="실제 마이그레이션 없이 확인만")
 def migrate(
     source_host,
@@ -185,6 +188,8 @@ def migrate(
     target_catalog,
     schema_name,
     table_names,
+    include_tables,
+    include_regex,
     exclude_tables,
     method,
     where_clause,
@@ -195,6 +200,7 @@ def migrate(
     parallel,
     parallel_inserts,
     batch_size,
+    stop_on_error,
     dry_run,
 ):
     """스키마/테이블 마이그레이션
@@ -280,11 +286,14 @@ def migrate(
                 schema=schema_name,
                 target_catalog=target_catalog,
                 method=method,
+                include_tables=list(include_tables) if include_tables else None,
+                include_regex=list(include_regex) if include_regex else None,
                 exclude_tables=list(exclude_tables),
                 partition_filter=list(partition_filter) if partition_filter else None,
                 target_schema=target_schema,
                 parallel_tables=parallel,
                 dry_run=dry_run,
+                stop_on_error=stop_on_error,
             )
             print_summary(summary)
 
@@ -353,11 +362,14 @@ def run(yaml_file, dry_run):
                 schema=schema_config.schema_name,
                 target_catalog=schema_config.target_catalog,
                 method=schema_config.method,
+                include_tables=schema_config.include,
+                include_regex=schema_config.include_regex,
                 exclude_tables=schema_config.exclude_tables,
                 partition_filter=schema_config.partition_filter,
                 target_schema=schema_config.target_schema,
                 parallel_tables=yaml_config.parallel_tables,
                 dry_run=yaml_config.dry_run or dry_run,
+                stop_on_error=yaml_config.stop_on_error,
             )
             summary.results.extend(schema_summary.results)
 
@@ -365,6 +377,145 @@ def run(yaml_file, dry_run):
 
     finally:
         migrator.close()
+
+
+@main.command()
+@click.option("--catalog", "-c", required=True, help="카탈로그")
+@click.option("--schema", "-s", "schema_name", required=True, help="스키마")
+@click.option("--table", "-t", "table_name", required=True, help="테이블")
+@click.option("--show-files", is_flag=True, help="파일 목록 상세 출력")
+def verify_s3(catalog, schema_name, table_name, show_files):
+    """S3 복사 결과 검증
+
+    소스와 타겟 S3의 파일을 비교하여 복사가 정상적으로 되었는지 확인합니다.
+
+    예시:
+      trino-migrate verify-s3 -c iceberg -s my_schema -t my_table
+      trino-migrate verify-s3 -c iceberg -s my_schema -t my_table --show-files
+    """
+    from trino_migration.extractor import MetadataExtractor
+
+    source_client = TrinoClient(
+        host=settings.source.host,
+        port=settings.source.port,
+        user=settings.source.user,
+        catalog=catalog,
+        schema=schema_name,
+    )
+
+    s3_copier = S3Copier(
+        aws_profile=settings.s3.aws_profile,
+        aws_region=settings.s3.aws_region,
+        source_endpoint_url=settings.s3.source_endpoint_url,
+        target_endpoint_url=settings.s3.target_endpoint_url,
+    )
+
+    try:
+        extractor = MetadataExtractor(source_client)
+        metadata = extractor.extract_table_metadata(catalog, schema_name, table_name)
+
+        if metadata is None:
+            console.print(f"[red]테이블을 찾을 수 없습니다: {catalog}.{schema_name}.{table_name}[/red]")
+            return
+
+        source_bucket = metadata.s3_bucket
+        source_prefix = metadata.s3_prefix
+
+        if not source_bucket or not source_prefix:
+            console.print(f"[red]S3 경로를 파싱할 수 없습니다: {metadata.location}[/red]")
+            return
+
+        console.print(f"\n[bold]테이블: {catalog}.{schema_name}.{table_name}[/bold]")
+        console.print(f"Location: {metadata.location}")
+
+        # 소스 S3 정보
+        console.print(f"\n[bold cyan]소스 S3:[/bold cyan]")
+        console.print(f"  버킷: {source_bucket}")
+        console.print(f"  prefix: {source_prefix}")
+        console.print(f"  endpoint: {settings.s3.source_endpoint_url or 'AWS 기본'}")
+
+        # 타겟 S3 정보 (같은 버킷/경로, 다른 endpoint)
+        console.print(f"\n[bold cyan]타겟 S3:[/bold cyan]")
+        console.print(f"  버킷: {source_bucket}")
+        console.print(f"  prefix: {source_prefix}")
+        console.print(f"  endpoint: {settings.s3.target_endpoint_url or 'AWS 기본'}")
+
+        # 검증 실행
+        console.print(f"\n[bold]검증 중...[/bold]")
+        result = s3_copier.verify_copy(
+            source_bucket=source_bucket,
+            source_prefix=source_prefix,
+            target_bucket=source_bucket,
+            target_prefix=source_prefix,
+        )
+
+        # 결과 출력
+        console.print(f"\n[bold]결과:[/bold]")
+        console.print(f"  소스 파일: {result['source_files']}개 ({result['source_size'] / 1024 / 1024:.2f} MB)")
+        console.print(f"  타겟 파일: {result['target_files']}개 ({result['target_size'] / 1024 / 1024:.2f} MB)")
+
+        if result['status'] == 'ok':
+            console.print(f"\n  [green]✓ 복사 완료: 소스와 타겟이 일치합니다[/green]")
+        elif result['status'] == 'empty':
+            console.print(f"\n  [yellow]⚠ 소스와 타겟 모두 파일 없음[/yellow]")
+        else:
+            console.print(f"\n  [red]✗ 불일치 발견[/red]")
+
+            if result['missing_in_target']:
+                console.print(f"\n  [red]타겟에 없는 파일 ({len(result['missing_in_target'])}개):[/red]")
+                for f in result['missing_in_target'][:10]:
+                    console.print(f"    - {f}")
+                if len(result['missing_in_target']) > 10:
+                    console.print(f"    [dim]... 외 {len(result['missing_in_target']) - 10}개[/dim]")
+
+            if result['extra_in_target']:
+                console.print(f"\n  [yellow]타겟에만 있는 파일 ({len(result['extra_in_target'])}개):[/yellow]")
+                for f in result['extra_in_target'][:10]:
+                    console.print(f"    - {f}")
+                if len(result['extra_in_target']) > 10:
+                    console.print(f"    [dim]... 외 {len(result['extra_in_target']) - 10}개[/dim]")
+
+            if result['size_mismatch']:
+                console.print(f"\n  [yellow]크기 불일치 ({len(result['size_mismatch'])}개):[/yellow]")
+                for item in result['size_mismatch'][:5]:
+                    console.print(f"    - {item['key']}: 소스 {item['source_size']} vs 타겟 {item['target_size']}")
+
+        # 상세 파일 목록
+        if show_files:
+            s3_copier.debug_list(source_bucket, source_prefix, use_source=True, show_details=True)
+            s3_copier.debug_list(source_bucket, source_prefix, use_source=False, show_details=True)
+
+    finally:
+        source_client.close()
+
+
+@main.command()
+@click.option("--bucket", "-b", required=True, help="S3 버킷")
+@click.option("--prefix", "-p", required=True, help="S3 prefix")
+@click.option("--source", "use_source", is_flag=True, default=True, help="소스 S3 (기본값)")
+@click.option("--target", "use_target", is_flag=True, help="타겟 S3")
+@click.option("--show-files", is_flag=True, help="파일 목록 출력")
+def s3_list(bucket, prefix, use_source, use_target, show_files):
+    """S3 객체 목록 조회
+
+    예시:
+      # 소스 S3 조회
+      trino-migrate s3-list -b my-bucket -p warehouse/my_table --source
+
+      # 타겟 S3 조회 (LocalStack)
+      trino-migrate s3-list -b my-bucket -p warehouse/my_table --target --show-files
+    """
+    s3_copier = S3Copier(
+        aws_profile=settings.s3.aws_profile,
+        aws_region=settings.s3.aws_region,
+        source_endpoint_url=settings.s3.source_endpoint_url,
+        target_endpoint_url=settings.s3.target_endpoint_url,
+    )
+
+    # --target 플래그가 있으면 타겟 S3 사용
+    is_source = not use_target
+
+    s3_copier.debug_list(bucket, prefix, use_source=is_source, show_details=show_files)
 
 
 @main.command()

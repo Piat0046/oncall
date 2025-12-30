@@ -5,12 +5,37 @@ Trino 마이그레이션 설정 모듈
 - YAML 마이그레이션 설정 로드
 """
 
+import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def matches_any_regex(name: str, patterns: list[str]) -> bool:
+    """이름이 정규식 패턴 중 하나와 매칭되는지 확인
+
+    Args:
+        name: 확인할 이름 (테이블명 등)
+        patterns: 정규식 패턴 목록
+
+    Returns:
+        하나라도 매칭되면 True
+
+    Examples:
+        >>> matches_any_regex("mview_commerce", ["^mview_"])
+        True
+        >>> matches_any_regex("commerce_log", ["_log$", "^test_"])
+        True
+        >>> matches_any_regex("users", ["^mview_", "_log$"])
+        False
+    """
+    for pattern in patterns:
+        if re.search(pattern, name):
+            return True
+    return False
 
 
 def _find_project_root() -> Path:
@@ -68,6 +93,18 @@ class TargetTrinoSettings(BaseSettings):
         return f"{self.host}:{self.port}"
 
 
+def _clean_endpoint_url(url: str | None) -> str | None:
+    """endpoint URL 정제 (주석, 공백 제거)"""
+    if not url:
+        return None
+    # 주석 제거 (# 이후 무시)
+    if "#" in url:
+        url = url.split("#")[0]
+    url = url.strip()
+    # 빈 문자열이면 None 반환
+    return url if url else None
+
+
 class S3Settings(BaseSettings):
     """S3 설정"""
 
@@ -90,6 +127,12 @@ class S3Settings(BaseSettings):
     # AWS 설정
     aws_profile: str = Field(default="default")
     aws_region: str = Field(default="ap-northeast-2")
+
+    def model_post_init(self, __context) -> None:
+        """초기화 후 endpoint URL 정제"""
+        # pydantic v2에서 값 수정
+        object.__setattr__(self, "source_endpoint_url", _clean_endpoint_url(self.source_endpoint_url))
+        object.__setattr__(self, "target_endpoint_url", _clean_endpoint_url(self.target_endpoint_url))
 
 
 class TrinoMigrationSettings(BaseSettings):
@@ -132,8 +175,16 @@ class TableMigrationConfig(BaseModel):
 class SchemaMigrationConfig(BaseModel):
     """스키마 단위 마이그레이션 설정"""
     catalog: str  # 소스 카탈로그 (필수)
-    schema_name: str = Field(alias="schema")
+    schema_name: str = Field(alias="schema")  # 단일 스키마 (내부용)
     method: Literal["s3_copy", "insert_select"] = "s3_copy"
+
+    # 포함할 테이블 (정확히 매칭)
+    # 예: ["users", "orders", "commerce_ad"]
+    include: list[str] | None = None
+
+    # 포함할 테이블 (정규식 패턴)
+    # 예: ["^mview_", "_log$", "commerce"]
+    include_regex: list[str] | None = None
 
     # 제외할 테이블
     exclude: list[str] | None = None
@@ -150,8 +201,79 @@ class SchemaMigrationConfig(BaseModel):
         """제외 테이블 목록 (None이면 빈 리스트)"""
         return self.exclude or []
 
+    def matches_include(self, table_name: str) -> bool:
+        """테이블이 include 조건에 맞는지 확인
+
+        - include와 include_regex 모두 None이면 모든 테이블 포함
+        - include: 정확한 문자열 매칭
+        - include_regex: 정규식 매칭 (re.search)
+        """
+        # 둘 다 없으면 모든 테이블 포함
+        if not self.include and not self.include_regex:
+            return True
+
+        # 정확한 매칭 체크
+        if self.include and table_name in self.include:
+            return True
+
+        # 정규식 매칭 체크
+        if self.include_regex and matches_any_regex(table_name, self.include_regex):
+            return True
+
+        return False
+
+    def filter_tables(self, tables: list[str]) -> list[str]:
+        """include/exclude 조건으로 테이블 필터링"""
+        result = []
+        exclude_set = set(self.exclude or [])
+
+        for table in tables:
+            # exclude 체크
+            if table in exclude_set:
+                continue
+            # include 체크
+            if not self.matches_include(table):
+                continue
+            result.append(table)
+
+        return result
+
     class Config:
         populate_by_name = True
+
+
+class SchemaMigrationConfigInput(BaseModel):
+    """스키마 마이그레이션 YAML 입력용 (schema가 리스트 가능)"""
+    catalog: str
+    schema_names: str | list[str] = Field(alias="schema")  # 단일 또는 리스트
+    method: Literal["s3_copy", "insert_select"] = "s3_copy"
+    include: list[str] | None = None
+    include_regex: list[str] | None = None
+    exclude: list[str] | None = None
+    partition_filter: list[str] | None = None
+    target_catalog: str | None = None
+    target_schema: str | None = None
+
+    class Config:
+        populate_by_name = True
+
+    def expand(self) -> list[SchemaMigrationConfig]:
+        """스키마 리스트를 개별 SchemaMigrationConfig로 펼침"""
+        schemas = self.schema_names if isinstance(self.schema_names, list) else [self.schema_names]
+        return [
+            SchemaMigrationConfig(
+                catalog=self.catalog,
+                schema=schema,
+                method=self.method,
+                include=self.include,
+                include_regex=self.include_regex,
+                exclude=self.exclude,
+                partition_filter=self.partition_filter,
+                target_catalog=self.target_catalog,
+                target_schema=self.target_schema,
+            )
+            for schema in schemas
+        ]
 
 
 class MigrationYAMLConfig(BaseModel):
@@ -163,13 +285,14 @@ class MigrationYAMLConfig(BaseModel):
     schemas: list[SchemaMigrationConfig] = Field(default_factory=list)
 
     # 전역 설정
-    parallel_tables: int = 3
-    parallel_partitions: int = 5
-    parallel_inserts: int = 4  # INSERT 병렬 수
+    parallel_tables: int = 3  # 테이블 단위 병렬 처리 (스키마 마이그레이션 시)
+    parallel_partitions: int = 5  # 파티션 단위 병렬 복사 (S3 복사 시)
+    parallel_inserts: int = 4  # 배치 INSERT 병렬 수 (INSERT SELECT 시)
     batch_size: int = 1000  # INSERT 배치 크기
     dry_run: bool = False
+    stop_on_error: bool = False  # 에러 발생 시 즉시 중단
 
-    # S3 설정 오버라이드
+    # S3 설정 오버라이드 (주의: s3_copy 방식은 소스 버킷 유지)
     source_bucket: str | None = None
     target_bucket: str | None = None
 
@@ -188,10 +311,12 @@ def load_yaml_config(yaml_path: str | Path) -> MigrationYAMLConfig:
     for t in data.get("tables") or []:
         tables.append(TableMigrationConfig(**t))
 
-    # schemas 파싱
+    # schemas 파싱 (리스트 지원)
     schemas = []
     for s in data.get("schemas") or []:
-        schemas.append(SchemaMigrationConfig(**s))
+        # SchemaMigrationConfigInput으로 파싱 후 expand
+        input_config = SchemaMigrationConfigInput(**s)
+        schemas.extend(input_config.expand())
 
     return MigrationYAMLConfig(
         tables=tables,
@@ -201,6 +326,7 @@ def load_yaml_config(yaml_path: str | Path) -> MigrationYAMLConfig:
         parallel_inserts=data.get("parallel_inserts", 4),
         batch_size=data.get("batch_size", 1000),
         dry_run=data.get("dry_run", False),
+        stop_on_error=data.get("stop_on_error", False),
         source_bucket=data.get("source_bucket"),
         target_bucket=data.get("target_bucket"),
     )

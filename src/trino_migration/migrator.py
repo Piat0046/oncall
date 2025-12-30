@@ -19,7 +19,6 @@ from rich.progress import (
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
-    TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -145,7 +144,12 @@ class TrinoMigrator:
         partition_filter: list[str] | None = None,
         dry_run: bool = False,
     ) -> MigrationResult:
-        """S3 복사 방식으로 테이블 마이그레이션"""
+        """S3 복사 방식으로 테이블 마이그레이션
+
+        주의: S3 복사 방식은 소스 S3 버킷 경로를 그대로 유지합니다.
+        이는 Iceberg 메타데이터 경로 일치를 위해 필수적입니다.
+        버킷을 변경하려면 insert_select 방식을 사용하세요.
+        """
         schema = target_schema or metadata.schema_name
         table = target_table or metadata.table_name
 
@@ -174,22 +178,56 @@ class TrinoMigrator:
                 error=f"S3 경로 파싱 실패: {metadata.location}",
             )
 
-        # 타겟 경로 생성 (소스 경로 구조 그대로 유지, 버킷만 변경)
+        # S3 복사 방식: 소스 버킷 경로 그대로 유지 (Iceberg 메타데이터 경로 일치)
+        target_bucket_name = source_bucket
         target_prefix = source_prefix
-        target_location = f"s3://{self.target_bucket}/{target_prefix}"
+        target_location = f"s3://{source_bucket}/{target_prefix}"
 
         console.print(f"  소스: s3://{source_bucket}/{source_prefix}")
-        console.print(f"  타겟: {target_location}")
+        console.print(f"  타겟: {target_location} [yellow](버킷 유지)[/yellow]")
 
-        # 타겟 경로 비우기 (기존 파일 삭제)
-        if not dry_run:
-            deleted = self.s3_copier.delete_prefix(self.target_bucket, target_prefix)
-            if deleted > 0:
-                console.print(f"  [dim]기존 파일 {deleted}개 삭제[/dim]")
+        # S3 경로가 동일하므로 기존 파일 삭제 스킵
 
         total_files = 0
         total_bytes = 0
         partitions_migrated = 0
+
+        is_iceberg = "iceberg" in target_catalog.lower()
+
+        # Iceberg 테이블: 기존 테이블 먼저 DROP (DROP 시 S3 파일도 삭제되므로 복사 전에 수행)
+        if is_iceberg and not dry_run:
+            if self.target_client.table_exists(schema, table, target_catalog):
+                self.target_client.execute(
+                    f"DROP TABLE {target_catalog}.{schema}.{table}",
+                    fetch=False,
+                )
+                console.print(f"  [dim]기존 테이블 삭제: {target_catalog}.{schema}.{table}[/dim]")
+
+        # Iceberg 테이블: metadata/ 폴더 먼저 복사 (register_table에 필요)
+        if is_iceberg:
+            metadata_prefix = f"{source_prefix}/metadata".lstrip("/")
+            console.print(f"  [dim]Iceberg metadata 복사: {metadata_prefix}[/dim]")
+            metadata_result = self.s3_copier.copy_prefix(
+                source_bucket=source_bucket,
+                source_prefix=metadata_prefix,
+                target_bucket=target_bucket_name,
+                target_prefix=f"{target_prefix}/metadata".lstrip("/"),
+                dry_run=dry_run,
+            )
+            if metadata_result.status == "error":
+                console.print(f"  [red]metadata 복사 실패: {metadata_result.error}[/red]")
+                return MigrationResult(
+                    catalog=target_catalog,
+                    schema_name=schema,
+                    table_name=table,
+                    method="s3_copy",
+                    status="error",
+                    error=f"metadata 복사 실패: {metadata_result.error}",
+                )
+            total_files += metadata_result.files_copied
+            total_bytes += metadata_result.bytes_copied
+            if metadata_result.status == "skipped":
+                console.print(f"  [yellow]metadata 폴더 없음: {metadata_result.error}[/yellow]")
 
         if metadata.is_partitioned:
             # 파티션 필터링
@@ -200,7 +238,7 @@ class TrinoMigrator:
                 results = self.s3_copier.copy_partitions(
                     source_bucket=source_bucket,
                     source_base_prefix=source_prefix,
-                    target_bucket=self.target_bucket,
+                    target_bucket=target_bucket_name,
                     target_base_prefix=target_prefix,
                     partitions=partitions,
                     partition_columns=metadata.partition_columns,
@@ -208,6 +246,16 @@ class TrinoMigrator:
                 )
 
                 for r in results:
+                    if r.status == "error":
+                        console.print(f"  [red]파티션 복사 실패: {r.error}[/red]")
+                        return MigrationResult(
+                            catalog=target_catalog,
+                            schema_name=schema,
+                            table_name=table,
+                            method="s3_copy",
+                            status="error",
+                            error=f"파티션 복사 실패: {r.error}",
+                        )
                     total_files += r.files_copied
                     total_bytes += r.bytes_copied
                     if r.status in ("success", "dry_run"):
@@ -217,10 +265,20 @@ class TrinoMigrator:
             result = self.s3_copier.copy_prefix(
                 source_bucket=source_bucket,
                 source_prefix=source_prefix,
-                target_bucket=self.target_bucket,
+                target_bucket=target_bucket_name,
                 target_prefix=target_prefix,
                 dry_run=dry_run,
             )
+            if result.status == "error":
+                console.print(f"  [red]데이터 복사 실패: {result.error}[/red]")
+                return MigrationResult(
+                    catalog=target_catalog,
+                    schema_name=schema,
+                    table_name=table,
+                    method="s3_copy",
+                    status="error",
+                    error=f"데이터 복사 실패: {result.error}",
+                )
             total_files = result.files_copied
             total_bytes = result.bytes_copied
             if result.status == "skipped":
@@ -231,18 +289,16 @@ class TrinoMigrator:
             try:
                 # 스키마 생성 (올바른 location 지정)
                 if not self.target_client.schema_exists(schema, target_catalog):
-                    schema_location = f"s3a://{self.target_bucket}/{self.target_prefix or 'warehouse'}/{schema}.db"
+                    schema_location = f"s3a://{target_bucket_name}/{self.target_prefix or 'warehouse'}/{schema}.db"
                     self.target_client.create_schema(schema, location=schema_location, catalog=target_catalog)
                     console.print(f"  [green]스키마 생성: {target_catalog}.{schema} ({schema_location})[/green]")
 
-                # 기존 테이블 존재 시 DROP
-                if self.target_client.table_exists(schema, table, target_catalog):
+                # 기존 테이블 존재 시 DROP (Iceberg는 S3 복사 전에 이미 DROP됨)
+                if not is_iceberg and self.target_client.table_exists(schema, table, target_catalog):
                     self.target_client.execute(
                         f"DROP TABLE {target_catalog}.{schema}.{table}",
                         fetch=False,
                     )
-
-                is_iceberg = "iceberg" in target_catalog.lower()
 
                 if is_iceberg:
                     # Iceberg: register_table 프로시저 사용 (기존 메타데이터 활용)
@@ -615,16 +671,7 @@ class TrinoMigrator:
                 error="VIEW 또는 MATERIALIZED VIEW는 마이그레이션 불가",
             )
 
-        # Iceberg 테이블은 S3 복사 불가 (메타데이터에 원본 경로가 하드코딩됨)
-        # 소스 또는 타겟이 Iceberg이면 자동으로 insert_select 방식 사용
-        is_iceberg_source = "iceberg" in config.catalog.lower()
-        is_iceberg_target = "iceberg" in (config.target_catalog or config.catalog).lower()
-        method = config.method
-        if (is_iceberg_source or is_iceberg_target) and method == "s3_copy":
-            console.print(f"  [yellow]Iceberg 테이블 → insert_select 방식으로 자동 전환[/yellow]")
-            method = "insert_select"
-
-        if method == "s3_copy":
+        if config.method == "s3_copy":
             return self.migrate_table_s3_copy(
                 metadata=metadata,
                 target_catalog=target_catalog,
@@ -651,34 +698,98 @@ class TrinoMigrator:
         schema: str,
         target_catalog: str | None = None,
         method: Literal["s3_copy", "insert_select"] = "s3_copy",
+        include_tables: list[str] | None = None,
+        include_regex: list[str] | None = None,
         exclude_tables: list[str] | None = None,
         partition_filter: list[str] | None = None,
         target_schema: str | None = None,
         parallel_tables: int = 3,
         dry_run: bool = False,
+        stop_on_error: bool = False,
     ) -> MigrationSummary:
-        """스키마 전체 마이그레이션 (테이블 단위 순차 처리)"""
+        """스키마 전체 마이그레이션 (테이블 단위 병렬 처리)
+
+        Args:
+            include_tables: 포함할 테이블 목록 (정확히 매칭)
+            include_regex: 포함할 테이블 정규식 패턴 목록
+        """
+        from trino_migration.config import matches_any_regex
+
         target_cat = target_catalog or catalog
+        tgt_schema = target_schema or schema
 
-        # Iceberg 테이블은 S3 복사 불가 - 자동으로 insert_select 사용
-        is_iceberg_source = "iceberg" in catalog.lower()
-        is_iceberg_target = "iceberg" in target_cat.lower()
-        actual_method = method
-        if (is_iceberg_source or is_iceberg_target) and method == "s3_copy":
-            console.print(f"  [yellow]Iceberg 스키마 → insert_select 방식으로 자동 전환[/yellow]")
-            actual_method = "insert_select"
+        console.print(f"\n[bold blue]{'─' * 70}[/bold blue]")
+        console.print(f"[bold]스키마 마이그레이션[/bold]: {catalog}.{schema} → {target_cat}.{tgt_schema}")
+        console.print(f"  방식: {method}, 병렬: {parallel_tables}")
+        if include_tables:
+            console.print(f"  [cyan]include: {include_tables}[/cyan]")
+        if include_regex:
+            console.print(f"  [cyan]include_regex: {include_regex}[/cyan]")
+        if stop_on_error:
+            console.print(f"  [yellow]stop_on_error: 활성화[/yellow]")
+        console.print(f"[bold blue]{'─' * 70}[/bold blue]")
 
-        console.print(f"\n[bold]스키마 마이그레이션: {catalog}.{schema} → {target_cat}.{target_schema or schema}[/bold]")
-        console.print(f"  방식: {actual_method}")
-
-        # 테이블 목록만 먼저 조회
+        # 테이블 목록 조회 및 필터링
         tables = self.source_client.get_tables(schema, catalog)
         exclude_set = set(exclude_tables or [])
         tables = [t for t in tables if t not in exclude_set]
 
-        console.print(f"  대상 테이블: {len(tables)}개")
+        # include 필터링 적용
+        if include_tables or include_regex:
+            include_set = set(include_tables or [])
+            filtered = []
+            for table in tables:
+                # 정확한 매칭
+                if table in include_set:
+                    filtered.append(table)
+                # 정규식 매칭
+                elif include_regex and matches_any_regex(table, include_regex):
+                    filtered.append(table)
+            tables = filtered
+
+        total_tables = len(tables)
+        console.print(f"  대상 테이블: {total_tables}개\n")
 
         summary = MigrationSummary()
+        results_lock = Lock()
+        error_occurred = [False]
+        first_error = [None]
+
+        def migrate_single_table(table: str) -> MigrationResult | None:
+            """단일 테이블 마이그레이션"""
+            try:
+                table_meta = self.extractor.extract_table_metadata(catalog, schema, table)
+
+                if table_meta is None:
+                    return None
+
+                if method == "s3_copy":
+                    return self._migrate_table_s3_copy_silent(
+                        metadata=table_meta,
+                        target_catalog=target_cat,
+                        target_schema=target_schema,
+                        partition_filter=partition_filter,
+                        dry_run=dry_run,
+                    )
+                else:
+                    return self.migrate_table_insert_select(
+                        metadata=table_meta,
+                        target_catalog=target_cat,
+                        target_schema=target_schema,
+                        dry_run=dry_run,
+                        batch_size=self.batch_size,
+                        parallel_inserts=self.parallel_inserts,
+                    )
+
+            except Exception as e:
+                return MigrationResult(
+                    catalog=target_cat,
+                    schema_name=tgt_schema,
+                    table_name=table,
+                    method=method,
+                    status="error",
+                    error=str(e),
+                )
 
         progress = Progress(
             SpinnerColumn(),
@@ -690,40 +801,272 @@ class TrinoMigrator:
         )
 
         with progress:
-            task = progress.add_task("테이블 마이그레이션", total=len(tables))
+            task = progress.add_task(f"마이그레이션 ({parallel_tables}P)", total=total_tables)
 
-            for table in tables:
-                # 1. 메타데이터 추출
-                table_meta = self.extractor.extract_table_metadata(catalog, schema, table)
+            with ThreadPoolExecutor(max_workers=parallel_tables) as executor:
+                futures = {
+                    executor.submit(migrate_single_table, table): table
+                    for table in tables
+                }
 
-                if table_meta is None:
-                    # VIEW 등 스킵
+                for future in as_completed(futures):
+                    table_name = futures[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            with results_lock:
+                                summary.results.append(result)
+
+                            # 에러 체크
+                            if result.status == "error":
+                                error_occurred[0] = True
+                                if first_error[0] is None:
+                                    first_error[0] = result
+
+                                if stop_on_error:
+                                    # 남은 future 취소
+                                    for f in futures:
+                                        f.cancel()
+                                    console.print(f"\n[bold red]에러 발생으로 중단:[/bold red]")
+                                    console.print(f"  테이블: {result.table_name}")
+                                    console.print(f"  에러: {result.error}")
+                                    break
+                            else:
+                                # 성공 시 간단히 표시
+                                if result.status == "success":
+                                    size_mb = result.bytes_copied / 1024 / 1024
+                                    console.print(f"  [green]✓[/green] {table_name} ({result.files_copied}파일, {size_mb:.1f}MB)")
+
+                    except Exception as e:
+                        with results_lock:
+                            error_result = MigrationResult(
+                                catalog=target_cat,
+                                schema_name=tgt_schema,
+                                table_name=table_name,
+                                method=method,
+                                status="error",
+                                error=str(e),
+                            )
+                            summary.results.append(error_result)
+                            error_occurred[0] = True
+                            if first_error[0] is None:
+                                first_error[0] = error_result
+
+                        if stop_on_error:
+                            console.print(f"\n[bold red]에러 발생으로 중단:[/bold red]")
+                            console.print(f"  테이블: {table_name}")
+                            console.print(f"  에러: {e}")
+                            break
+
                     progress.advance(task)
-                    continue
-
-                # 2. 바로 마이그레이션
-                if actual_method == "s3_copy":
-                    result = self.migrate_table_s3_copy(
-                        metadata=table_meta,
-                        target_catalog=target_cat,
-                        target_schema=target_schema,
-                        partition_filter=partition_filter,
-                        dry_run=dry_run,
-                    )
-                else:
-                    result = self.migrate_table_insert_select(
-                        metadata=table_meta,
-                        target_catalog=target_cat,
-                        target_schema=target_schema,
-                        dry_run=dry_run,
-                        batch_size=self.batch_size,
-                        parallel_inserts=self.parallel_inserts,
-                    )
-
-                summary.results.append(result)
-                progress.advance(task)
 
         return summary
+
+    def _migrate_table_s3_copy_silent(
+        self,
+        metadata: TableMetadata,
+        target_catalog: str,
+        target_schema: str | None = None,
+        target_table: str | None = None,
+        partition_filter: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> MigrationResult:
+        """S3 복사 방식 (콘솔 출력 없음)"""
+        schema = target_schema or metadata.schema_name
+        table = target_table or metadata.table_name
+
+        if not metadata.location:
+            return MigrationResult(
+                catalog=target_catalog,
+                schema_name=schema,
+                table_name=table,
+                method="s3_copy",
+                status="error",
+                error="소스 테이블에 S3 location이 없습니다",
+            )
+
+        source_bucket = metadata.s3_bucket
+        source_prefix = metadata.s3_prefix
+
+        if not source_bucket or not source_prefix:
+            return MigrationResult(
+                catalog=target_catalog,
+                schema_name=schema,
+                table_name=table,
+                method="s3_copy",
+                status="error",
+                error=f"S3 경로 파싱 실패: {metadata.location}",
+            )
+
+        # S3 복사 방식: 소스 버킷 경로 그대로 유지
+        target_bucket_name = source_bucket
+        target_prefix = source_prefix
+        target_location = f"s3://{source_bucket}/{target_prefix}"
+
+        total_files = 0
+        total_bytes = 0
+        partitions_migrated = 0
+
+        is_iceberg = "iceberg" in target_catalog.lower()
+
+        # Iceberg 테이블: 기존 테이블 먼저 DROP (DROP 시 S3 파일도 삭제되므로 복사 전에 수행)
+        if is_iceberg and not dry_run:
+            if self.target_client.table_exists(schema, table, target_catalog):
+                self.target_client.execute(
+                    f"DROP TABLE {target_catalog}.{schema}.{table}",
+                    fetch=False,
+                )
+
+        # Iceberg 테이블: metadata/ 폴더 먼저 복사 (register_table에 필요)
+        if is_iceberg:
+            metadata_prefix = f"{source_prefix}/metadata".lstrip("/")
+            metadata_result = self.s3_copier.copy_prefix(
+                source_bucket=source_bucket,
+                source_prefix=metadata_prefix,
+                target_bucket=target_bucket_name,
+                target_prefix=f"{target_prefix}/metadata".lstrip("/"),
+                dry_run=dry_run,
+            )
+            if metadata_result.status == "error":
+                return MigrationResult(
+                    catalog=target_catalog,
+                    schema_name=schema,
+                    table_name=table,
+                    method="s3_copy",
+                    status="error",
+                    error=f"metadata 복사 실패: {metadata_result.error}",
+                )
+            total_files += metadata_result.files_copied
+            total_bytes += metadata_result.bytes_copied
+
+        if metadata.is_partitioned:
+            partitions = self.extractor.filter_partitions(metadata, partition_filter)
+
+            if partitions:
+                results = self.s3_copier.copy_partitions(
+                    source_bucket=source_bucket,
+                    source_base_prefix=source_prefix,
+                    target_bucket=target_bucket_name,
+                    target_base_prefix=target_prefix,
+                    partitions=partitions,
+                    partition_columns=metadata.partition_columns,
+                    dry_run=dry_run,
+                    silent=True,
+                )
+
+                for r in results:
+                    if r.status == "error":
+                        return MigrationResult(
+                            catalog=target_catalog,
+                            schema_name=schema,
+                            table_name=table,
+                            method="s3_copy",
+                            status="error",
+                            error=f"파티션 복사 실패: {r.error}",
+                        )
+                    total_files += r.files_copied
+                    total_bytes += r.bytes_copied
+                    if r.status in ("success", "dry_run"):
+                        partitions_migrated += 1
+        else:
+            result = self.s3_copier.copy_prefix(
+                source_bucket=source_bucket,
+                source_prefix=source_prefix,
+                target_bucket=target_bucket_name,
+                target_prefix=target_prefix,
+                dry_run=dry_run,
+            )
+            if result.status == "error":
+                return MigrationResult(
+                    catalog=target_catalog,
+                    schema_name=schema,
+                    table_name=table,
+                    method="s3_copy",
+                    status="error",
+                    error=f"데이터 복사 실패: {result.error}",
+                )
+            total_files = result.files_copied
+            total_bytes = result.bytes_copied
+
+        # 타겟에 테이블 생성
+        if not dry_run:
+            try:
+                # 스키마 생성
+                if not self.target_client.schema_exists(schema, target_catalog):
+                    schema_location = f"s3a://{target_bucket_name}/{self.target_prefix or 'warehouse'}/{schema}.db"
+                    self.target_client.create_schema(schema, location=schema_location, catalog=target_catalog)
+
+                # 기존 테이블 DROP (Iceberg는 S3 복사 전에 이미 DROP됨)
+                if not is_iceberg and self.target_client.table_exists(schema, table, target_catalog):
+                    self.target_client.execute(
+                        f"DROP TABLE {target_catalog}.{schema}.{table}",
+                        fetch=False,
+                    )
+
+                if is_iceberg:
+                    try:
+                        self.target_client.execute(
+                            f"CALL {target_catalog}.system.register_table('{schema}', '{table}', '{target_location}')",
+                            fetch=False,
+                        )
+                    except Exception as reg_err:
+                        error_msg = str(reg_err)
+                        # 메타데이터 파일 없음 에러 처리
+                        if "No versioned metadata file exists" in error_msg:
+                            return MigrationResult(
+                                catalog=target_catalog,
+                                schema_name=schema,
+                                table_name=table,
+                                method="s3_copy",
+                                status="error",
+                                files_copied=total_files,
+                                bytes_copied=total_bytes,
+                                partitions_migrated=partitions_migrated,
+                                error=f"메타데이터 없음: {target_location}/metadata",
+                            )
+                        raise  # 다른 에러는 상위로 전파
+                else:
+                    target_ddl = self.extractor.generate_target_ddl(
+                        metadata,
+                        target_catalog=target_catalog,
+                        target_schema=schema,
+                        target_table=table,
+                        target_location=target_location,
+                    )
+                    self.target_client.execute(target_ddl, fetch=False)
+
+                    if metadata.is_partitioned:
+                        try:
+                            self.target_client.execute(
+                                f"CALL {target_catalog}.system.sync_partition_metadata('{schema}', '{table}', 'FULL')",
+                                fetch=False,
+                            )
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                return MigrationResult(
+                    catalog=target_catalog,
+                    schema_name=schema,
+                    table_name=table,
+                    method="s3_copy",
+                    status="error",
+                    files_copied=total_files,
+                    bytes_copied=total_bytes,
+                    partitions_migrated=partitions_migrated,
+                    error=str(e),
+                )
+
+        return MigrationResult(
+            catalog=target_catalog,
+            schema_name=schema,
+            table_name=table,
+            method="s3_copy",
+            status="dry_run" if dry_run else "success",
+            files_copied=total_files,
+            bytes_copied=total_bytes,
+            partitions_migrated=partitions_migrated,
+        )
 
     def close(self):
         """리소스 정리"""
@@ -760,6 +1103,20 @@ def print_summary(summary: MigrationSummary):
     # 실패 목록
     errors = [r for r in summary.results if r.status == "error"]
     if errors:
-        console.print("\n[red]실패 목록:[/red]")
-        for r in errors:
-            console.print(f"  - {r.catalog}.{r.schema_name}.{r.table_name}: {r.error}")
+        console.print(f"\n[bold red]실패 목록 ({len(errors)}개):[/bold red]")
+        # 에러 유형별 그룹화
+        metadata_errors = [r for r in errors if "메타데이터 없음" in (r.error or "")]
+        other_errors = [r for r in errors if "메타데이터 없음" not in (r.error or "")]
+
+        if metadata_errors:
+            console.print(f"\n  [yellow]메타데이터 없음 ({len(metadata_errors)}개):[/yellow]")
+            for r in metadata_errors[:10]:  # 최대 10개
+                console.print(f"    - {r.table_name}")
+            if len(metadata_errors) > 10:
+                console.print(f"    [dim]... 외 {len(metadata_errors) - 10}개[/dim]")
+
+        if other_errors:
+            console.print(f"\n  [red]기타 에러 ({len(other_errors)}개):[/red]")
+            for r in other_errors:
+                error_short = (r.error or "알 수 없음")[:80]
+                console.print(f"    - {r.table_name}: {error_short}")

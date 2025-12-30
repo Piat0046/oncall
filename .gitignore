@@ -50,3 +50,6 @@ htmlcov/
 data/
 cache/
 .zed/
+
+# Trino config (generated from template at runtime)
+docker/trino/etc/*/config.properties

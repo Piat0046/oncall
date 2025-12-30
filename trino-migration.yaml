@@ -4,15 +4,24 @@
 # ============================================================
 # 전역 설정
 # ============================================================
-parallel_tables: 1 # 동시 테이블 처리 수
+parallel_tables: 5 # 동시 테이블 처리 수
 parallel_partitions: 1 # 동시 파티션 처리 수
-parallel_inserts: 8 # INSERT 병렬 수 (Iceberg는 2 권장)
+parallel_inserts: 1 # INSERT 병렬 수 (Iceberg는 2 권장)
 batch_size: 3000 # INSERT 배치 크기
 dry_run: false # true로 설정하면 실제 마이그레이션 없이 확인만
-
-# S3 설정 (환경변수 오버라이드)
-# source_bucket: source-data-lake
-# target_bucket: target-data-lake
+stop_on_error: true
+# ============================================================
+# 마이그레이션 방식 선택 가이드
+# ============================================================
+# 1. s3_copy: S3 파일 복사 + 메타데이터 등록
+#    - 소스 S3 버킷 경로를 그대로 유지 (Iceberg 메타데이터 경로 일치 필수)
+#    - 빠르고 효율적 (Trino 부하 없음)
+#    - 프로덕션 → LocalStack (동일 버킷명) 마이그레이션에 적합
+#
+# 2. insert_select: Trino 쿼리로 데이터 추출 + INSERT
+#    - 버킷 변경 가능, WHERE 조건 지원
+#    - Trino 부하 높음, 느림
+#    - 조건부 추출 또는 버킷 변경이 필요한 경우 사용
 
 # ============================================================
 # 개별 테이블 마이그레이션
@@ -65,14 +74,107 @@ tables:
 # # ============================================================
 schemas:
   # ---------------------------------------------------------
-  # 스키마 전체 테이블 S3 복사 (일부 제외)
+  # 스키마 전체 테이블 S3 복사
+  # 주의: s3_copy는 소스 S3 버킷을 그대로 유지합니다
   # ---------------------------------------------------------
-  - catalog: iceberg # 소스 카탈로그 (타겟도 동일)
-    schema: laplacian_3
-    method: s3_copy
+  - catalog: iceberg # 소스 카탈로그
+    schema:
+      - laplacian_3
+      # - laplacian_2792
+    method: s3_copy # 소스 버킷 유지 (예: s3://warehouse/laplacian_3.db/*)
     # target_catalog 미지정 시 소스와 동일한 카탈로그 사용
-    exclude: # 제외할 테이블
-
+    include:
+      # Commerce 핵심 테이블
+      - commerce_order
+      - commerce_user
+      - commerce_product
+      - commerce_ad
+      - commerce_category
+      - commerce_review
+      # Dimension 테이블
+      - commerce_dim_user
+      - commerce_dim_product
+      - commerce_dim_ad
+      - commerce_dim_paid_option
+      - commerce_dim_paid_option_history
+      - commerce_dim_paid_product
+      # 통계 기본 테이블
+      - base_pay_stat
+      - base_item_stat
+      - base_item_stat_roll_up
+      # 기타
+      - commerce_gift_relation
+      - brand_channel_shop
+      - commerce_item
+      - commerce_union_item_relation
+      - data_id_to_shop
+      - label
+      - label_group
+      # 공통 최종 테이블
+      - commerce_order_log0
+      - commerce_product_log0
+      - commerce_user_log0
+      - commerce_category_log0
+      - commerce_review_log0
+      - commerce_ad_log0
+      - commerce_cogs_log0
+      # Join 테이블
+      - commerce_order_join
+      - commerce_product_join
+      - commerce_ad_join
+    include_regex:
+      # 로그 테이블 (log0, log1, log2)
+      - "^commerce_.*_log[0-2]$"
+      # Materialized Views
+      - "^mview_"
+      # 통계 테이블 (빈도별)
+      - "^commerce_pay_stat_"
+      - "^commerce_product_stat_"
+      - "^commerce_option_stat_"
+      # 아이템 주문 테이블
+      - "^commerce_item_order"
+      # 광고 주문 테이블
+      - "^commerce_ad_order"
+      # Shop 관련 테이블
+      - "^shop_"
+      - "^daily_shop_"
+      - "^monthly_shop_"
+      # Lookup 테이블
+      - "^lookup_table_"
+      # Sourcing 테이블 (Iceberg)
+      - "^commerce_.*_sourcing$"
+      # Provider별 소싱 패턴
+      - "^commerce_REST_API_.*_log0$"
+      - "^commerce_DB_.*_log0$"
+      - "^commerce_FILE_.*_log0$"
+      # Cafe24 Analytics
+      - "^cafe24_analytics_.*_src$"
+      # Google Ads 소스
+      - "^campaign_src$"
+      - "^ad_group_src$"
+      - "^ad_src$"
+      - "^keyword_.*_src$"
+      # Qoo10 소스
+      - "^shipping_.*_src$"
+      - "^item_detail_info_src$"
+      - "^selling_report_.*_src$"
+      # Shopby 소싱
+      - "^commerce_orders_sourcing$"
+      - "^commerce_products_sourcing$"
+      - "^commerce_members_sourcing$"
+      - "^commerce_brands_sourcing$"
+      - "^commerce_merchandisers_sourcing$"
+      - "^commerce_grades_sourcing$"
+      - "^commerce_reviews_sourcing$"
+      - "^commerce_categories_sourcing$"
+      - "^commerce_claims_sourcing$"
+      - "^commerce_display_categories_sourcing$"
+      - "^commerce_mall_info_sourcing$"
+    exclude:
+      - ".*_tmp$"
+      - ".*_tmp_.*"
+      - ".*_airflow_.*"
+      - ".*_backup_.*"
 
 #   # ---------------------------------------------------------
 #   # 다른 카탈로그로 마이그레이션 + 파티션 필터
